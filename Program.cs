@@ -304,8 +304,10 @@ async Task DiagnoseAsync()
         Log($"Bluetooth: {radio?.State.ToString() ?? "no adapter found"}");
     }
     catch (Exception ex) { Log($"Bluetooth: couldn't read ({ex.Message})"); }
-    var service = BluetoothService.State();
-    Log($"Bluetooth service: {service switch { null => "couldn't read", 0 => "not running", _ => $"running (process {service})" }}");
+    var services = BluetoothService.States();
+    if (services == null) Log("Bluetooth services: couldn't read");
+    else foreach (var (name, pid) in services)
+        Log($"{BluetoothService.FriendlyName(name)} ({name}): {(pid == 0 ? "not running" : $"running (process {pid})")}");
 
     var snap = DeviceSnapshot.Take(out var error);
     if (snap == null)
@@ -465,8 +467,8 @@ _ = UpdateLoopAsync(firstUpdateCheck);
 await Task.WhenAny(firstUpdateCheck.Task, Task.Delay(TimeSpan.FromSeconds(15)));
 _ = KeepBluetoothOnAsync();
 _ = RepairLoopAsync();
-// The watcher is rebuilt when Windows stops it, or when the Bluetooth Support Service stops or
-// restarts (e.g. from services.msc), since a watcher from before the restart may go quiet without notice.
+// The watcher is rebuilt when Windows stops it, when a Bluetooth service stops or restarts
+// (e.g. from services.msc), and quietly every 10 minutes, since a watcher can go quiet without notice.
 while (true)
 {
     DeviceWatcher watcher;
@@ -481,22 +483,25 @@ while (true)
         await Task.Delay(TimeSpan.FromSeconds(10));
         continue;
     }
-    var serviceState = BluetoothService.State();
+    var services = BluetoothService.States();
+    var watcherStarted = DateTime.Now;
     string? reason = null;
     while (reason == null)
     {
         await Task.Delay(TimeSpan.FromSeconds(5));
         var status = watcher.Status;
-        var state = BluetoothService.State();
         if (status is DeviceWatcherStatus.Stopped or DeviceWatcherStatus.Aborted)
             reason = $"Device watcher {status.ToString().ToLowerInvariant()}";
-        else if (state != null && serviceState != null && state != serviceState)
-            reason = state == 0 ? "Bluetooth service stopped" : "Bluetooth service restarted";
+        else if (BluetoothService.Changed(services, BluetoothService.States()) is { } change)
+            reason = change;
+        else if (DateTime.Now - watcherStarted > TimeSpan.FromMinutes(10))
+            reason = "";  // routine refresh
     }
-    Log($"{reason}; restarting the watcher in 3s");
     try { if (watcher.Status is DeviceWatcherStatus.Started or DeviceWatcherStatus.EnumerationCompleted) watcher.Stop(); }
     catch { }
     lock (gate) devices.Clear();
+    if (reason == "") continue;  // routine refresh: no log, no radio check
+    Log($"{reason}; restarting the watcher in 3s");
     bluetoothRadio = null;  // the radio object from before a service restart may be stale
     await Task.Delay(TimeSpan.FromSeconds(3));
     try
@@ -551,15 +556,47 @@ static class BluetoothService
     [DllImport("advapi32.dll")]
     static extern bool CloseServiceHandle(IntPtr handle);
 
-    // Process ID of the running Bluetooth Support Service (bthserv): changes when it restarts,
-    // 0 while it is stopped or starting, null if it can't be read. Needs no admin rights.
-    public static int? State()
+    public static string FriendlyName(string name) =>
+        name == "bthserv" ? "Bluetooth Support Service" : "Bluetooth User Support Service";
+
+    // Process IDs of the Bluetooth Support Service (bthserv) and the per-user Bluetooth User Support
+    // Service (BluetoothUserService_<suffix>), or null if bthserv can't be read. Needs no admin rights.
+    public static Dictionary<string, int>? States()
+    {
+        if (State("bthserv") is not { } bthserv) return null;
+        var result = new Dictionary<string, int> { ["bthserv"] = bthserv };
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services");
+            foreach (var name in key?.GetSubKeyNames() ?? [])
+                if (name.StartsWith("BluetoothUserService_", StringComparison.OrdinalIgnoreCase) && State(name) is { } pid)
+                    result[name] = pid;
+        }
+        catch { }  // the user service is optional; bthserv alone still works
+        return result;
+    }
+
+    // Describes the first service that stopped or restarted between two readings, or null.
+    public static string? Changed(Dictionary<string, int>? before, Dictionary<string, int>? now)
+    {
+        if (before == null || now == null) return null;
+        foreach (var (name, pid) in before)
+        {
+            var current = now.GetValueOrDefault(name);
+            if (current != pid) return $"{FriendlyName(name)} {(current == 0 ? "stopped" : "restarted")}";
+        }
+        return null;
+    }
+
+    // Process ID of a running service: changes when it restarts, 0 while it is stopped or starting,
+    // null if it can't be read.
+    public static int? State(string name)
     {
         var manager = OpenSCManagerW(null, null, ScManagerConnect);
         if (manager == IntPtr.Zero) return null;
         try
         {
-            var service = OpenServiceW(manager, "bthserv", ServiceQueryStatus);
+            var service = OpenServiceW(manager, name, ServiceQueryStatus);
             if (service == IntPtr.Zero) return null;
             try
             {
