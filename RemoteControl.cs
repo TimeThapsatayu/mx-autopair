@@ -1,8 +1,8 @@
 // Remote control: every 3s, asks GitHub which commit the repo's "control" branch points to (a git
 // ref listing, which isn't cached), and when it changes, fetches control.json from that exact commit.
 // The file must be signed with the command center's key. It can only choose among things this program
-// already does - wiggler on/off, its timing and click mix, one burst now - and this PC fits every value
-// into its own limits (WigglerSettings.Normalize). Unknown fields are ignored; nothing in it is run.
+// already does - wiggler on/off, its timing, scenario and their settings, one burst now - and this PC fits
+// every value into its own limits (WigglerSettings.Normalize). Unknown fields are ignored; nothing in it is run.
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -18,7 +18,9 @@ sealed class RemoteControl
     const int MaxFileBytes = 8192;
     static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(3), BackoffInterval = TimeSpan.FromSeconds(15);
     static readonly TimeSpan BurstFreshness = TimeSpan.FromMinutes(2);  // older "burst now" requests are ignored
-    static readonly Regex ControlRef = new(@"([0-9a-f]{40}) refs/heads/control(?:\x00|\n|$)", RegexOptions.CultureInvariant);
+    // MXAUTOPAIR_CONTROL_BRANCH points a test run at another branch; installed copies use "control".
+    static readonly string Branch = Environment.GetEnvironmentVariable("MXAUTOPAIR_CONTROL_BRANCH") is { Length: > 0 } b ? b : "control";
+    static readonly Regex ControlRef = new($@"([0-9a-f]{{40}}) refs/heads/{Regex.Escape(Branch)}(?:\x00|\n|$)", RegexOptions.CultureInvariant);
 
     readonly HttpClient http;
     readonly Action<string> log;
@@ -126,15 +128,7 @@ sealed class RemoteControl
             var seq = root.GetProperty("seq").GetInt64();
             var issued = root.TryGetProperty("issued", out var i) && i.TryGetDateTimeOffset(out var at) ? at : DateTimeOffset.MinValue;
             var burstNow = root.TryGetProperty("burstNow", out var b) && b.ValueKind == JsonValueKind.True;
-            var w = root.GetProperty("wiggler");
-            double Num(string name, double fallback) =>
-                w.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : fallback;
-            var d = WigglerSettings.Default;
-            var settings = new WigglerSettings(
-                w.TryGetProperty("enabled", out var e) ? e.ValueKind == JsonValueKind.True : d.Enabled,
-                Num("minInterval", d.MinInterval), Num("maxInterval", d.MaxInterval),
-                Num("minBurst", d.MinBurst), Num("maxBurst", d.MaxBurst),
-                Num("leftClick", d.LeftClick), Num("rightClick", d.RightClick), Num("scroll", d.Scroll)).Normalize();
+            var settings = WigglerSettings.FromJson(root.GetProperty("wiggler"));
             return (new ControlInstructions(seq, issued, burstNow, settings), "ok");
         }
         catch (Exception ex) when (ex is JsonException or FormatException or KeyNotFoundException or InvalidOperationException)
@@ -170,13 +164,7 @@ sealed class RemoteControl
         {
             using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
             var root = doc.RootElement;
-            var w = root.GetProperty("wiggler");
-            var settings = new WigglerSettings(
-                w.GetProperty("enabled").GetBoolean(),
-                w.GetProperty("minInterval").GetDouble(), w.GetProperty("maxInterval").GetDouble(),
-                w.GetProperty("minBurst").GetDouble(), w.GetProperty("maxBurst").GetDouble(),
-                w.GetProperty("leftClick").GetDouble(), w.GetProperty("rightClick").GetDouble(),
-                w.GetProperty("scroll").GetDouble()).Normalize();
+            var settings = WigglerSettings.FromJson(root.GetProperty("wiggler"));
             return (root.GetProperty("appliedSeq").GetInt64(), settings);
         }
         catch
@@ -199,16 +187,8 @@ sealed class RemoteControl
             {
                 json.WriteStartObject();
                 json.WriteNumber("appliedSeq", seq);
-                json.WriteStartObject("wiggler");
-                json.WriteBoolean("enabled", s.Enabled);
-                json.WriteNumber("minInterval", s.MinInterval);
-                json.WriteNumber("maxInterval", s.MaxInterval);
-                json.WriteNumber("minBurst", s.MinBurst);
-                json.WriteNumber("maxBurst", s.MaxBurst);
-                json.WriteNumber("leftClick", s.LeftClick);
-                json.WriteNumber("rightClick", s.RightClick);
-                json.WriteNumber("scroll", s.Scroll);
-                json.WriteEndObject();
+                json.WritePropertyName("wiggler");
+                s.WriteJson(json);
                 json.WriteEndObject();
             }
             var temp = statePath + ".tmp";

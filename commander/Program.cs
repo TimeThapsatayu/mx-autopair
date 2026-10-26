@@ -1,5 +1,5 @@
 // MxAutoPair command center (runs on the publishing PC only): a control page on http://localhost:8790
-// that signs wiggler settings with the command key and force-pushes them as control.json to the repo's
+// that signs wiggler settings (scenario, timing, action delay and per-scenario options) with the command key and force-pushes them as control.json to the repo's
 // "control" branch, which installed copies check every 3 seconds (RemoteControl.cs).
 // The page only answers this PC: requests must use Host localhost:8790, and changes need a custom
 // header that other websites can't send, so a web page open in the browser can't trigger a publish.
@@ -11,12 +11,15 @@ using System.Text;
 using System.Text.Json;
 
 const string Repo = "TimeThapsatayu/mx-autopair";
-const int Port = 8790;
-const string Origin = "http://localhost:8790";
+// Testing only: another branch/port, so tests never reach the real "control" branch installed copies follow.
+var branch = Environment.GetEnvironmentVariable("MXCOMMAND_BRANCH") is { Length: > 0 } b ? b : "control";
+var Port = int.TryParse(Environment.GetEnvironmentVariable("MXCOMMAND_PORT"), out var p) ? p : 8790;
+var Origin = $"http://localhost:{Port}";
+var suffix = branch == "control" ? "" : "-" + branch;
 var home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".mxautopair");
 var keyPath = Path.Combine(home, "command-signing-key.pem");
-var repoDir = Path.Combine(home, "control-repo");
-var lastPath = Path.Combine(home, "command-last.json");  // last payload sent, to show on the page
+var repoDir = Path.Combine(home, "control-repo" + suffix);
+var lastPath = Path.Combine(home, $"command-last{suffix}.json");  // last payload sent, to show on the page
 var publishLock = new SemaphoreSlim(1, 1);
 
 if (!File.Exists(keyPath))
@@ -33,7 +36,7 @@ using (var reader = new StreamReader(stream))
 var listener = new HttpListener();
 listener.Prefixes.Add($"http://localhost:{Port}/");
 listener.Start();
-Console.WriteLine($"Command center running at {Origin} - close this window to stop it.");
+Console.WriteLine($"Command center running at {Origin} (branch {branch}) - close this window to stop it.");
 if (!args.Contains("--no-browser"))
     try { Process.Start(new ProcessStartInfo(Origin) { UseShellExecute = true }); } catch { }
 
@@ -103,6 +106,7 @@ async Task<(bool Ok, string Json)> PublishAsync(string body)
 {
     using var input = JsonDocument.Parse(body);
     var w = input.RootElement.GetProperty("wiggler");
+    if (w.ValueKind != JsonValueKind.Object) return (false, Error("wiggler settings must be an object"));
     var burstNow = input.RootElement.TryGetProperty("burstNow", out var b) && b.ValueKind == JsonValueKind.True;
     var seq = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();  // always increases, nothing to remember
     var issued = DateTimeOffset.UtcNow;
@@ -114,11 +118,10 @@ async Task<(bool Ok, string Json)> PublishAsync(string body)
         json.WriteNumber("seq", seq);
         json.WriteString("issued", issued);
         json.WriteBoolean("burstNow", burstNow);
-        json.WriteStartObject("wiggler");
-        json.WriteBoolean("enabled", w.GetProperty("enabled").GetBoolean());
-        foreach (var name in new[] { "minInterval", "maxInterval", "minBurst", "maxBurst", "leftClick", "rightClick", "scroll" })
-            json.WriteNumber(name, w.GetProperty(name).GetDouble());
-        json.WriteEndObject();
+        // Passed through as sent by the page; the personal PC reads only fields it knows and fits every
+        // value into its own limits, so nothing here needs to (or can) widen what it will do.
+        json.WritePropertyName("wiggler");
+        w.WriteTo(json);
         json.WriteEndObject();
     }
     var payload = payloadStream.ToArray();
@@ -140,7 +143,7 @@ async Task<(bool Ok, string Json)> PublishAsync(string body)
             ? await Git("commit", "-q", "--amend", "-m", $"control #{seq}")
             : await Git("commit", "-q", "-m", $"control #{seq}");
         if (!commit.Ok) return (false, Error($"git commit failed: {commit.Output}"));
-        var push = await Git("push", "-q", "-f", "origin", "control");
+        var push = await Git("push", "-q", "-f", "origin", branch);
         if (!push.Ok) return (false, Error($"git push failed: {push.Output}"));
     }
     finally { publishLock.Release(); }
@@ -156,7 +159,7 @@ async Task EnsureRepoAsync()
 {
     if (Directory.Exists(Path.Combine(repoDir, ".git"))) return;
     Directory.CreateDirectory(repoDir);
-    await Git("init", "-q", "-b", "control");
+    await Git("init", "-q", "-b", branch);
     await Git("config", "user.email", "262097405+TimeThapsatayu@users.noreply.github.com");
     await Git("config", "user.name", "TimeThapsatayu");
     await Git("config", "core.autocrlf", "false");

@@ -495,6 +495,15 @@ if (args.Contains("--wiggler-dry-run", StringComparer.OrdinalIgnoreCase))
     return;
 }
 
+// Testing: one 2s burst of each scenario with a 50-150ms action delay; all logic runs, no input is sent.
+if (args.Contains("--scenario-dry-run", StringComparer.OrdinalIgnoreCase))
+{
+    var test = new Wiggler(WigglerSettings.Default, Log, dryRun: true);
+    foreach (var scenario in WigglerSettings.Scenarios.Append("mixed"))
+        test.RunBurst(WigglerSettings.Default with { Scenario = scenario, MinActionDelay = 50, MaxActionDelay = 150, TrackHoldFire = true }, 2);
+    return;
+}
+
 // Testing: polls the control branch for real for ~60s, applying to a dry-run wiggler (no input, no Bluetooth).
 if (args.Contains("--remote-dry-run", StringComparer.OrdinalIgnoreCase))
 {
