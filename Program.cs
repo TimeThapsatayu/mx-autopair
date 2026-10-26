@@ -495,12 +495,19 @@ if (args.Contains("--wiggler-dry-run", StringComparer.OrdinalIgnoreCase))
     return;
 }
 
-// Testing: one 2s burst of each scenario with a 50-150ms action delay; all logic runs, no input is sent.
+// Testing: one 2s burst of each scenario with a 50-150ms action delay, then flick and track at stress 0%
+// and 100%; all logic runs, no input is sent.
 if (args.Contains("--scenario-dry-run", StringComparer.OrdinalIgnoreCase))
 {
     var test = new Wiggler(WigglerSettings.Default, Log, dryRun: true);
     foreach (var scenario in WigglerSettings.Scenarios.Append("mixed"))
         test.RunBurst(WigglerSettings.Default with { Scenario = scenario, MinActionDelay = 50, MaxActionDelay = 150, TrackHoldFire = true }, 2);
+    foreach (var stress in new[] { 0.0, 1.0 })
+        foreach (var scenario in new[] { "flick", "track" })
+        {
+            Log($"TEST stress {stress:0%}:");
+            test.RunBurst(WigglerSettings.Default with { Scenario = scenario, Stress = stress }, 3);
+        }
     return;
 }
 

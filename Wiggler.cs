@@ -1,6 +1,7 @@
 // Mouse wiggler for testing mouse-tracking software: on a random interval it sends a burst of mouse input
-// through SendInput, following one scenario (WigglerSettings): random moves and clicks, flicks onto targets,
-// tracking a strafing target, or recoil-style sprays, with an optional pause between actions. Moves are
+// through SendInput, following one scenario (WigglerSettings): random moves and clicks, flicks onto targets
+// with micro-adjustments, jiggle-peeks, tracking a strafing target, or recoil-style sprays, with an optional
+// pause between actions. A simulated hand (HandNoise) adds tremor and twitches scaled by the stress setting. Moves are
 // relative (like a real mouse), so raw-input games see them too. Bursts run on schedule regardless of
 // other input. The command center changes the settings (RemoteControl.cs); Ctrl+Alt+W toggles locally.
 using System.Diagnostics;
@@ -14,7 +15,9 @@ sealed class Wiggler
     readonly AutoResetEvent wake = new(false);
     volatile WigglerSettings settings;
     volatile bool burstRequested;
-    int sentEvents, steps;
+    int sentEvents, steps, reversals, lastDirX;
+    HandNoise hand = new(new Random(), 0);
+    double handX, handY, handCarryX, handCarryY;
     // A 1ms step needs a high-resolution timer: Windows 11 stretches Thread.Sleep(1) to ~15ms for
     // programs without a visible window, which would cut movement to ~60 updates per second.
     readonly IntPtr stepTimer = CreateWaitableTimerExW(IntPtr.Zero, null, HighResolutionTimer, TimerAllAccess);
@@ -119,8 +122,11 @@ sealed class Wiggler
         var scenario = s.Scenario == "mixed" ? s.Mixed[random.Next(s.Mixed.Count)] : s.Scenario;
         var end = Stopwatch.GetTimestamp() + (long)(duration.TotalSeconds * Stopwatch.Frequency);
         var timer = Stopwatch.StartNew();
-        sentEvents = steps = 0;
-        timeBeginPeriod(1);  // 1ms sleeps for smooth movement
+        sentEvents = steps = reversals = lastDirX = 0;
+        hand = new HandNoise(random, s.Stress);
+        (handX, handY) = hand.Offset(Now());
+        handCarryX = handCarryY = 0;
+        timeBeginPeriod(1);
         try
         {
             var summary = scenario switch
@@ -128,15 +134,20 @@ sealed class Wiggler
                 "flick" => Flick(s, end),
                 "track" => Track(s, end),
                 "spray" => Spray(s, end),
+                "peek" => Peek(s, end),
                 _ => RandomMoves(s, end),
             };
+            var seconds = timer.Elapsed.TotalSeconds;
             log($"Wiggle {duration.TotalSeconds:0.0}s {scenario}{(requested ? " (requested)" : "")}{(dryRun ? " [dry run]" : "")}: " +
-                $"{summary}; {sentEvents} input events in {timer.Elapsed.TotalSeconds:0.0}s, movement updates ~{steps / timer.Elapsed.TotalSeconds:0}/s");
+                $"{summary}; {sentEvents} input events in {seconds:0.0}s, movement updates ~{steps / seconds:0}/s, " +
+                $"direction changes ~{reversals / seconds:0}/s");
         }
         finally { timeEndPeriod(1); }
     }
 
     static bool Before(long end) => Stopwatch.GetTimestamp() < end;
+
+    static double Now() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
 
     // Waits about 1ms between movement steps.
     void Step()
@@ -148,23 +159,59 @@ sealed class Wiggler
         else Thread.Sleep(1);
     }
 
+    // How far the hand's tremor and twitches moved since the last step, in whole pixels.
+    (int X, int Y) HandStep()
+    {
+        var (x, y) = hand.Offset(Now());
+        handCarryX += x - handX;
+        handCarryY += y - handY;
+        (handX, handY) = (x, y);
+        int stepX = (int)Math.Truncate(handCarryX), stepY = (int)Math.Truncate(handCarryY);
+        handCarryX -= stepX;
+        handCarryY -= stepY;
+        return (stepX, stepY);
+    }
+
+    // "Holding still": no intended movement, but the hand keeps trembling.
+    void Hold(double ms, long end = long.MaxValue)
+    {
+        var until = Math.Min(end, Stopwatch.GetTimestamp() + (long)(ms / 1000 * Stopwatch.Frequency));
+        while (Stopwatch.GetTimestamp() < until)
+        {
+            Step();
+            var (x, y) = HandStep();
+            Move(x, y);
+        }
+    }
+
     // The pause between mouse actions, cut short at the end of the burst.
     void Pause(WigglerSettings s, long end)
     {
-        if (s.MaxActionDelay <= 0) return;
-        var remaining = (end - Stopwatch.GetTimestamp()) * 1000.0 / Stopwatch.Frequency;
-        var ms = Math.Min(Between(s.MinActionDelay, s.MaxActionDelay), remaining);
-        if (ms > 0) Thread.Sleep(TimeSpan.FromMilliseconds(ms));
+        if (s.MaxActionDelay > 0) Hold(Between(s.MinActionDelay, s.MaxActionDelay), end);
     }
 
-    // Curved moves to random points on the screen, each followed by a possible click, right click or scroll.
+    void Move(int dx, int dy)
+    {
+        if (dx == 0 && dy == 0) return;
+        if (dx != 0)
+        {
+            var direction = Math.Sign(dx);
+            if (lastDirX != 0 && direction != lastDirX) reversals++;
+            lastDirX = direction;
+        }
+        Send(new MouseInput { Dx = dx, Dy = dy, Flags = MoveFlag });
+    }
+
+    // Moves to random points on the screen, landing a little off and correcting, each followed by a
+    // possible click, right click or scroll.
     string RandomMoves(WigglerSettings s, long end)
     {
         var (left, top, width, height) = Screen();
         int moves = 0, leftClicks = 0, rightClicks = 0, scrolls = 0;
         while (Before(end))
         {
-            MoveTo(left + random.Next(width), top + random.Next(height), Millis(150, 700), end, bend: 0.4);
+            GetCursorPos(out var at);
+            Aim(left + random.Next(width) - at.X, top + random.Next(height) - at.Y, Between(150, 700), end, 0.4, s.Stress, 0.1);
             moves++;
             var roll = random.NextDouble();
             if (roll < s.LeftClick) { Click(LeftDownFlag, LeftUpFlag, 40, 120); leftClicks++; }
@@ -175,32 +222,58 @@ sealed class Wiggler
         return $"{moves} moves, {leftClicks} left clicks, {rightClicks} right clicks, {scrolls} scrolls";
     }
 
-    // Pause, fast flick to a target (sometimes overshooting), a small settling correction, then a shot.
+    // Pause, fast flick to a target (sometimes overshooting), a correction, a few tiny micro-adjustments
+    // while settling, then a shot.
     string Flick(WigglerSettings s, long end)
     {
-        int flicks = 0, overshoots = 0;
+        int flicks = 0, overshoots = 0, adjustments = 0, shots = 0;
         while (Before(end))
         {
             Pause(s, end);
             if (!Before(end)) break;
             var (dx, dy) = OnScreenVector(Between(s.MinFlickDistance, s.MaxFlickDistance));
-            var overshoot = random.NextDouble() < s.FlickOvershoot;
-            var reach = overshoot ? Between(1.05, 1.17) : Between(0.95, 0.99);  // past it, or just short
-            MoveBy(dx * reach, dy * reach, Millis(s.MinFlickTime, s.MaxFlickTime), end, bend: 0.08);
-            MoveBy(dx * (1 - reach), dy * (1 - reach), overshoot ? Millis(60, 150) : Millis(40, 90), long.MaxValue, bend: 0);
-            Click(LeftDownFlag, LeftUpFlag, 30, 80);
+            if (Aim(dx, dy, Between(s.MinFlickTime, s.MaxFlickTime), end, 0.08, s.Stress, s.FlickOvershoot)) overshoots++;
+            var count = random.Next(2, 3 + (int)Math.Round(4 * s.Stress));
+            MicroAdjust(count, s.Stress);
+            adjustments += count;
+            shots += FireBurst(s);
             flicks++;
-            if (overshoot) overshoots++;
         }
-        return $"{flicks} flicks ({overshoots} overshot), {flicks} shots";
+        return $"{flicks} flicks ({overshoots} overshot), {adjustments} micro-adjustments, {shots} shots";
     }
 
-    // Follows a strafing target: steady movement that reverses direction, with slight hand tremor.
+    // Jiggle-peeking: quick, uneven left-right swings like strafing in and out of cover, then a few
+    // micro-adjustments and, more often than not, a shot.
+    string Peek(WigglerSettings s, long end)
+    {
+        int peeks = 0, swings = 0, shots = 0;
+        while (Before(end))
+        {
+            Pause(s, end);
+            if (!Before(end)) break;
+            var direction = random.Next(2) == 0 ? -1 : 1;
+            for (var i = random.Next(2, 6); i > 0 && Before(end); i--)
+            {
+                var size = Between(s.MinPeekAmplitude, s.MaxPeekAmplitude) * (random.NextDouble() < 0.25 ? 0.4 : 1);
+                MoveBy(direction * size, Between(-3, 3), Between(s.MinPeekSwing, s.MaxPeekSwing), end, 0.05, s.Stress);
+                if (random.NextDouble() < 0.7) direction = -direction;  // usually swings back, sometimes repeats
+                Hold(Between(0, 40), end);
+                swings++;
+            }
+            if (!Before(end)) break;
+            MicroAdjust(random.Next(1, 3 + (int)Math.Round(2 * s.Stress)), s.Stress);
+            if (random.NextDouble() < 0.6) shots += FireBurst(s);
+            peeks++;
+        }
+        return $"{peeks} peeks, {swings} swings, {shots} shots";
+    }
+
+    // Follows a strafing target: steady movement that reverses direction with a short reaction lag, with
+    // speed that surges and sags under stress, plus the hand's tremor.
     string Track(WigglerSettings s, long end)
     {
         var (left, top, width, height) = Screen();
-        double tremorHz = Between(8, 12), tremorAmp = Between(0.5, 1.5), phase = Between(0, Math.Tau);
-        double carryX = 0, carryY = 0;
+        double carryX = 0, carryY = 0, prevX = 0, prevY = 0;
         var segments = 0;
         if (s.TrackHoldFire) Send(new MouseInput { Flags = LeftDownFlag });
         try
@@ -216,21 +289,31 @@ sealed class Wiggler
                 if (at.Y < top + height * 0.15) dirY = Math.Abs(dirY);
                 if (at.Y > top + height * 0.85) dirY = -Math.Abs(dirY);
                 var norm = Math.Sqrt(dirX * dirX + dirY * dirY);
+                (dirX, dirY) = (dirX / norm, dirY / norm);
+                double surgeHz = Between(0.5, 2), surgePhase = Between(0, Math.Tau), lag = Between(0.06, 0.18);
+                var segmentStart = Now();
                 var segmentEnd = Math.Min(end, Stopwatch.GetTimestamp() + (long)(Between(0.15, 0.7) * Stopwatch.Frequency));
-                var last = Stopwatch.GetTimestamp();
+                var last = segmentStart;
                 while (Stopwatch.GetTimestamp() < segmentEnd)
                 {
                     Step();
-                    var now = Stopwatch.GetTimestamp();
-                    var dt = (now - last) / (double)Stopwatch.Frequency;
-                    var t = now / (double)Stopwatch.Frequency;
-                    last = now;
-                    // Tremor is added as the change in a small sine offset, so it never drifts.
-                    var shake = tremorAmp * Math.Tau * tremorHz * dt;
-                    carryX += dirX / norm * speed * dt + shake * Math.Cos(Math.Tau * tremorHz * t + phase);
-                    carryY += dirY / norm * speed * dt + shake * Math.Sin(Math.Tau * tremorHz * t + phase * 1.7);
-                    SendCarry(ref carryX, ref carryY);
+                    var t = Now();
+                    var dt = t - last;
+                    last = t;
+                    // Reaction lag: the aim keeps its old heading briefly before turning to the new one.
+                    var k = Math.Min(1, (t - segmentStart) / lag);
+                    var headingX = prevX * (1 - k) + dirX * k;
+                    var headingY = prevY * (1 - k) + dirY * k;
+                    var v = speed * (1 + 0.35 * s.Stress * Math.Sin(Math.Tau * surgeHz * t + surgePhase));
+                    carryX += headingX * v * dt;
+                    carryY += headingY * v * dt;
+                    int stepX = (int)Math.Truncate(carryX), stepY = (int)Math.Truncate(carryY);
+                    carryX -= stepX;
+                    carryY -= stepY;
+                    var (hx, hy) = HandStep();
+                    Move(stepX + hx, stepY + hy);
                 }
+                (prevX, prevY) = (dirX, dirY);
                 segments++;
                 Pause(s, end);
             }
@@ -239,7 +322,7 @@ sealed class Wiggler
         return $"{segments} tracking segments{(s.TrackHoldFire ? ", fire held" : "")}";
     }
 
-    // Holds fire while pulling down steadily (recoil control) with a slow sideways wobble.
+    // Holds fire while pulling down against recoil with a sideways wobble; under stress the pull is uneven.
     string Spray(WigglerSettings s, long end)
     {
         var sprays = 0;
@@ -248,27 +331,51 @@ sealed class Wiggler
             Pause(s, end);
             if (!Before(end)) break;
             var sprayEnd = Math.Min(end, Stopwatch.GetTimestamp() + (long)(Between(s.MinSprayTime, s.MaxSprayTime) / 1000 * Stopwatch.Frequency));
-            double wobbleHz = Between(2, 5), phase = Between(0, Math.Tau), carryX = 0, carryY = 0;
+            double wobbleHz = Between(2, 5), phase = Between(0, Math.Tau), pullHz = Between(1, 3), carryX = 0, carryY = 0;
             Send(new MouseInput { Flags = LeftDownFlag });
             try
             {
-                var last = Stopwatch.GetTimestamp();
+                var last = Now();
                 while (Stopwatch.GetTimestamp() < sprayEnd)
                 {
                     Step();
-                    var now = Stopwatch.GetTimestamp();
-                    var dt = (now - last) / (double)Stopwatch.Frequency;
-                    var t = now / (double)Stopwatch.Frequency;
-                    last = now;
+                    var t = Now();
+                    var dt = t - last;
+                    last = t;
                     carryX += s.SprayWobble * Math.Tau * wobbleHz * Math.Cos(Math.Tau * wobbleHz * t + phase) * dt;
-                    carryY += s.SprayPull * dt;
-                    SendCarry(ref carryX, ref carryY);
+                    carryY += s.SprayPull * (1 + 0.4 * s.Stress * Math.Sin(Math.Tau * pullHz * t)) * dt;
+                    int stepX = (int)Math.Truncate(carryX), stepY = (int)Math.Truncate(carryY);
+                    carryX -= stepX;
+                    carryY -= stepY;
+                    var (hx, hy) = HandStep();
+                    Move(stepX + hx, stepY + hy);
                 }
             }
             finally { Send(new MouseInput { Flags = LeftUpFlag }); }
             sprays++;
         }
         return $"{sprays} sprays";
+    }
+
+    // Burst fire: several quick taps, with a small downward pull against recoil and the hand trembling
+    // between them. Returns the number of shots.
+    int FireBurst(WigglerSettings s)
+    {
+        var shots = random.Next((int)s.MinShots, (int)s.MaxShots + 1);
+        for (var i = 0; i < shots; i++)
+        {
+            var gap = Between(s.MinShotGap, s.MaxShotGap);
+            var hold = Math.Min(Between(25, 60), gap * 0.6);
+            Send(new MouseInput { Flags = LeftDownFlag });
+            Hold(hold);
+            Send(new MouseInput { Flags = LeftUpFlag });
+            if (i == shots - 1) break;
+            var pull = Math.Min(gap - hold, Between(12, 25));
+            MoveBy(Between(-1, 1), Between(1, 3), pull, long.MaxValue, 0, s.Stress);
+            Hold(gap - hold - pull);
+        }
+        Hold(Between(30, 100));
+        return shots;
     }
 
     // A vector of the given length in a random direction, turned around if it would leave the screen.
@@ -285,55 +392,81 @@ sealed class Wiggler
         }
     }
 
-    void MoveTo(int x, int y, TimeSpan time, long burstEnd, double bend)
+    // An aimed move: the main movement lands a little off (overshooting with the given chance, more
+    // scattered under stress), then one or two small corrections bring it onto the target.
+    // Returns whether it overshot.
+    bool Aim(double dx, double dy, double ms, long end, double bend, double stress, double overshootChance)
     {
-        GetCursorPos(out var start);
-        MoveBy(x - start.X, y - start.Y, time, burstEnd, bend);
+        var overshoot = random.NextDouble() < overshootChance;
+        var reach = overshoot ? Between(1.05, 1.17 + 0.08 * stress) : Between(0.9 - 0.05 * stress, 0.99);
+        var miss = Between(-0.03, 0.03) * (1 + stress);  // angle error, radians
+        double mainX = (dx * Math.Cos(miss) - dy * Math.Sin(miss)) * reach;
+        double mainY = (dx * Math.Sin(miss) + dy * Math.Cos(miss)) * reach;
+        MoveBy(mainX, mainY, ms, end, bend, stress);
+        double restX = dx - mainX, restY = dy - mainY;
+        var corrections = random.NextDouble() < stress ? 2 : 1;
+        for (var i = corrections; i > 0; i--)
+        {
+            var part = i == 1 ? 1 : Between(0.5, 0.8);
+            MoveBy(restX * part, restY * part, overshoot ? Between(60, 150) : Between(30, 90), long.MaxValue, 0, stress);
+            restX -= restX * part;
+            restY -= restY * part;
+            Hold(Between(10, 40));
+        }
+        return overshoot;
     }
 
-    // Moves by (dx, dy) along an eased path with an optional sideways arc, sent as relative steps, so it
-    // lands roughly on target on the desktop and turns smoothly in games.
-    void MoveBy(double dx, double dy, TimeSpan time, long burstEnd, double bend)
+    // Tiny fine-aim nudges (1-6px) with short hesitations, like settling onto a head.
+    void MicroAdjust(int count, double stress)
     {
+        for (var i = 0; i < count; i++)
+        {
+            var size = Between(1, 3 + 3 * stress);
+            var angle = Between(0, Math.Tau);
+            MoveBy(Math.Cos(angle) * size, Math.Sin(angle) * size, Between(15, 45), long.MaxValue, 0, stress);
+            Hold(Between(20, 80));
+        }
+    }
+
+    // Moves by (dx, dy) along an eased path, sent as relative steps so it lands roughly on target on the
+    // desktop and turns naturally in games. Stress adds speed surges and sideways wander mid-move (both
+    // fade out at the ends, so the landing point is unchanged), and the hand's tremor rides on top.
+    void MoveBy(double dx, double dy, double ms, long burstEnd, double bend, double stress)
+    {
+        var length = Math.Sqrt(dx * dx + dy * dy);
         var arcSize = (random.NextDouble() - 0.5) * bend;
+        double surgeHz = Between(5, 12), surgePhase = Between(0, Math.Tau), wanderHz = Between(3, 9), wanderPhase = Between(0, Math.Tau);
+        var wander = length > 0 ? Math.Min(15, length * 0.04) * stress / length : 0;  // fraction of the move
         double sentX = 0, sentY = 0;
         var t0 = Stopwatch.GetTimestamp();
-        var total = Math.Max(1, time.TotalSeconds * Stopwatch.Frequency);
+        var total = Math.Max(1, ms / 1000 * Stopwatch.Frequency);
         while (true)
         {
             var now = Stopwatch.GetTimestamp();
             var p = Math.Min(1, (now - t0) / total);
-            var eased = p < 0.5 ? 2 * p * p : 1 - Math.Pow(-2 * p + 2, 2) / 2;
-            var arc = Math.Sin(p * Math.PI) * arcSize;
-            var stepX = (int)Math.Round(dx * eased - dy * arc - sentX);
-            var stepY = (int)Math.Round(dy * eased + dx * arc - sentY);
-            if (stepX != 0 || stepY != 0)
-            {
-                Send(new MouseInput { Dx = stepX, Dy = stepY, Flags = MoveFlag });
-                sentX += stepX;
-                sentY += stepY;
-            }
+            var t = now / (double)Stopwatch.Frequency;
+            var envelope = Math.Sin(p * Math.PI);
+            var eased = (p < 0.5 ? 2 * p * p : 1 - Math.Pow(-2 * p + 2, 2) / 2)
+                      + 0.06 * stress * envelope * Math.Sin(Math.Tau * surgeHz * t + surgePhase);
+            var side = arcSize * envelope + wander * envelope * Math.Sin(Math.Tau * wanderHz * t + wanderPhase);
+            var pathX = (int)Math.Round(dx * eased - dy * side - sentX);
+            var pathY = (int)Math.Round(dy * eased + dx * side - sentY);
+            sentX += pathX;
+            sentY += pathY;
+            var (hx, hy) = HandStep();
+            Move(pathX + hx, pathY + hy);
             if (p >= 1 || now >= burstEnd) return;
             Step();
         }
     }
 
-    // Sends the whole-pixel part of an accumulated movement, keeping the fraction for later.
-    void SendCarry(ref double carryX, ref double carryY)
-    {
-        int stepX = (int)Math.Truncate(carryX), stepY = (int)Math.Truncate(carryY);
-        if (stepX == 0 && stepY == 0) return;
-        Send(new MouseInput { Dx = stepX, Dy = stepY, Flags = MoveFlag });
-        carryX -= stepX;
-        carryY -= stepY;
-    }
-
+    // A click; the hand keeps trembling while the button is down and just after.
     void Click(int down, int up, int minHold, int maxHold)
     {
         Send(new MouseInput { Flags = down });
-        Thread.Sleep(random.Next(minHold, maxHold + 1));
+        Hold(random.Next(minHold, maxHold + 1));
         Send(new MouseInput { Flags = up });
-        Thread.Sleep(random.Next(30, 101));
+        Hold(random.Next(30, 101));
     }
 
     void Scroll()
@@ -342,7 +475,7 @@ sealed class Wiggler
         for (int i = random.Next(1, 6); i > 0; i--)
         {
             Send(new MouseInput { MouseData = 120 * direction, Flags = WheelFlag });
-            Thread.Sleep(random.Next(20, 61));
+            Hold(random.Next(20, 61));
         }
     }
 

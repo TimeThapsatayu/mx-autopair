@@ -8,8 +8,9 @@ and recovers when the Bluetooth Support Service restarts.
 - **Install:** unzip a release package and double-click `Install.cmd` (starts at sign-in, relaunches within a minute if closed).
 - **Remove:** `Uninstall.cmd`.
 - **Mouse wiggler** (for testing mouse-tracking software): on a random interval, a burst of mouse input following a
-  scenario - random moves/clicks/scrolls, flicks onto targets, tracking a strafing target, recoil-style sprays, or a
-  mix - with an optional delay between actions. Runs on schedule regardless of other input; **Ctrl+Alt+W** toggles it.
+  scenario - random moves/clicks/scrolls, flicks onto targets with micro-adjustments, jiggle-peeks, tracking a strafing
+  target, recoil-style sprays, or a mix - with burst firing, an optional delay between actions, and a simulated hand
+  whose tremor and twitches scale with a stress setting. Runs on schedule regardless of other input; **Ctrl+Alt+W** toggles it.
 - **Command center** (publishing PC only): `Command Center.cmd` opens a control page on `http://localhost:8790` to start/stop
   the wiggler, request a burst, and pick its scenario, timing, action delay and scenario options. Settings are signed with the command key and pushed to
   the `control` branch; installed copies check it every 3 s and fit every value into their own limits.

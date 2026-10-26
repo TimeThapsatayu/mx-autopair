@@ -5,7 +5,7 @@ using System.Text.Json;
 
 sealed record WigglerSettings
 {
-    public static readonly string[] Scenarios = ["random", "flick", "track", "spray"];
+    public static readonly string[] Scenarios = ["random", "flick", "track", "spray", "peek"];
     public static readonly WigglerSettings Default = new();
 
     public bool Enabled { get; init; } = true;
@@ -17,6 +17,7 @@ sealed record WigglerSettings
     public double MaxActionDelay { get; init; } = 0;
     public string Scenario { get; init; } = "random";  // one of Scenarios, or "mixed"
     public IReadOnlyList<string> Mixed { get; init; } = Scenarios;  // what "mixed" picks from
+    public double Stress { get; init; } = 0.5;         // hand tremor and twitchiness, 0 = calm, 1 = high-stakes
 
     // random: chance of each action after a move (they share one roll)
     public double LeftClick { get; init; } = 0.25;
@@ -41,6 +42,18 @@ sealed record WigglerSettings
     public double SprayPull { get; init; } = 150;
     public double SprayWobble { get; init; } = 3;
 
+    // shooting (flick and peek shots): burst fire - taps per trigger pull, and the gap between taps (ms)
+    public double MinShots { get; init; } = 3;
+    public double MaxShots { get; init; } = 4;
+    public double MinShotGap { get; init; } = 70;
+    public double MaxShotGap { get; init; } = 110;
+
+    // peek: jiggle-peeking - quick uneven left-right swings (px, ms each), then micro-adjust and maybe shoot
+    public double MinPeekAmplitude { get; init; } = 15;
+    public double MaxPeekAmplitude { get; init; } = 90;
+    public double MinPeekSwing { get; init; } = 60;
+    public double MaxPeekSwing { get; init; } = 160;
+
     public WigglerSettings Normalize()
     {
         static double Fit(double v, double min, double max, double fallback) =>
@@ -58,6 +71,10 @@ sealed record WigglerSettings
         var (minFlick, maxFlick) = Range(MinFlickTime, MaxFlickTime, 10, 5000, d.MinFlickTime, d.MaxFlickTime);
         var (minSpeed, maxSpeed) = Range(MinTrackSpeed, MaxTrackSpeed, 1, 20000, d.MinTrackSpeed, d.MaxTrackSpeed);
         var (minSpray, maxSpray) = Range(MinSprayTime, MaxSprayTime, 50, 10000, d.MinSprayTime, d.MaxSprayTime);
+        var (minPeek, maxPeek) = Range(MinPeekAmplitude, MaxPeekAmplitude, 1, 2000, d.MinPeekAmplitude, d.MaxPeekAmplitude);
+        var (minSwing, maxSwing) = Range(MinPeekSwing, MaxPeekSwing, 10, 2000, d.MinPeekSwing, d.MaxPeekSwing);
+        var (minShots, maxShots) = Range(Math.Round(MinShots), Math.Round(MaxShots), 1, 20, d.MinShots, d.MaxShots);
+        var (minGap, maxGap) = Range(MinShotGap, MaxShotGap, 20, 1000, d.MinShotGap, d.MaxShotGap);
         double left = Fit(LeftClick, 0, 1, d.LeftClick), right = Fit(RightClick, 0, 1, d.RightClick), scroll = Fit(Scroll, 0, 1, d.Scroll);
         var total = left + right + scroll;
         if (total > 1) { left /= total; right /= total; scroll /= total; }
@@ -69,6 +86,7 @@ sealed record WigglerSettings
             MinActionDelay = minDelay, MaxActionDelay = maxDelay,
             Scenario = Scenarios.Contains(Scenario) || Scenario == "mixed" ? Scenario : "random",
             Mixed = mixed.Length > 0 ? mixed : ["random"],
+            Stress = Fit(Stress, 0, 1, d.Stress),
             LeftClick = left, RightClick = right, Scroll = scroll,
             MinFlickDistance = minDistance, MaxFlickDistance = maxDistance,
             MinFlickTime = minFlick, MaxFlickTime = maxFlick,
@@ -77,6 +95,10 @@ sealed record WigglerSettings
             MinSprayTime = minSpray, MaxSprayTime = maxSpray,
             SprayPull = Fit(SprayPull, 0, 5000, d.SprayPull),
             SprayWobble = Fit(SprayWobble, 0, 500, d.SprayWobble),
+            MinPeekAmplitude = minPeek, MaxPeekAmplitude = maxPeek,
+            MinPeekSwing = minSwing, MaxPeekSwing = maxSwing,
+            MinShots = minShots, MaxShots = maxShots,
+            MinShotGap = minGap, MaxShotGap = maxGap,
         };
     }
 
@@ -97,7 +119,7 @@ sealed record WigglerSettings
             MinInterval = Num("minInterval", d.MinInterval), MaxInterval = Num("maxInterval", d.MaxInterval),
             MinBurst = Num("minBurst", d.MinBurst), MaxBurst = Num("maxBurst", d.MaxBurst),
             MinActionDelay = Num("minActionDelay", d.MinActionDelay), MaxActionDelay = Num("maxActionDelay", d.MaxActionDelay),
-            Scenario = scenario, Mixed = mixed,
+            Scenario = scenario, Mixed = mixed, Stress = Num("stress", d.Stress),
             LeftClick = Num("leftClick", d.LeftClick), RightClick = Num("rightClick", d.RightClick), Scroll = Num("scroll", d.Scroll),
             MinFlickDistance = Num("minFlickDistance", d.MinFlickDistance), MaxFlickDistance = Num("maxFlickDistance", d.MaxFlickDistance),
             MinFlickTime = Num("minFlickTime", d.MinFlickTime), MaxFlickTime = Num("maxFlickTime", d.MaxFlickTime),
@@ -106,6 +128,10 @@ sealed record WigglerSettings
             TrackHoldFire = Flag("trackHoldFire", d.TrackHoldFire),
             MinSprayTime = Num("minSprayTime", d.MinSprayTime), MaxSprayTime = Num("maxSprayTime", d.MaxSprayTime),
             SprayPull = Num("sprayPull", d.SprayPull), SprayWobble = Num("sprayWobble", d.SprayWobble),
+            MinPeekAmplitude = Num("minPeekAmplitude", d.MinPeekAmplitude), MaxPeekAmplitude = Num("maxPeekAmplitude", d.MaxPeekAmplitude),
+            MinPeekSwing = Num("minPeekSwing", d.MinPeekSwing), MaxPeekSwing = Num("maxPeekSwing", d.MaxPeekSwing),
+            MinShots = Num("minShots", d.MinShots), MaxShots = Num("maxShots", d.MaxShots),
+            MinShotGap = Num("minShotGap", d.MinShotGap), MaxShotGap = Num("maxShotGap", d.MaxShotGap),
         }.Normalize();
     }
 
@@ -123,6 +149,7 @@ sealed record WigglerSettings
         json.WriteStartArray("mixed");
         foreach (var name in Mixed) json.WriteStringValue(name);
         json.WriteEndArray();
+        json.WriteNumber("stress", Stress);
         json.WriteNumber("leftClick", LeftClick);
         json.WriteNumber("rightClick", RightClick);
         json.WriteNumber("scroll", Scroll);
@@ -138,6 +165,14 @@ sealed record WigglerSettings
         json.WriteNumber("maxSprayTime", MaxSprayTime);
         json.WriteNumber("sprayPull", SprayPull);
         json.WriteNumber("sprayWobble", SprayWobble);
+        json.WriteNumber("minPeekAmplitude", MinPeekAmplitude);
+        json.WriteNumber("maxPeekAmplitude", MaxPeekAmplitude);
+        json.WriteNumber("minPeekSwing", MinPeekSwing);
+        json.WriteNumber("maxPeekSwing", MaxPeekSwing);
+        json.WriteNumber("minShots", MinShots);
+        json.WriteNumber("maxShots", MaxShots);
+        json.WriteNumber("minShotGap", MinShotGap);
+        json.WriteNumber("maxShotGap", MaxShotGap);
         json.WriteEndObject();
     }
 
@@ -145,6 +180,6 @@ sealed record WigglerSettings
     {
         var scenario = Scenario == "mixed" ? $"mixed ({string.Join("/", Mixed)})" : Scenario;
         var delay = MaxActionDelay > 0 ? $", action delay {MinActionDelay:0}-{MaxActionDelay:0}ms" : "";
-        return $"{(Enabled ? "on" : "off")}, {scenario}, every {MinInterval:0.#}-{MaxInterval:0.#}s, bursts {MinBurst:0.#}-{MaxBurst:0.#}s{delay}";
+        return $"{(Enabled ? "on" : "off")}, {scenario}, stress {Stress:0%}, every {MinInterval:0.#}-{MaxInterval:0.#}s, bursts {MinBurst:0.#}-{MaxBurst:0.#}s{delay}";
     }
 }

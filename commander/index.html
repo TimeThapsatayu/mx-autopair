@@ -67,6 +67,7 @@
         <option value="flick">Flick: flick to a target, settle, shoot</option>
         <option value="track">Tracking: follow a strafing target</option>
         <option value="spray">Spray: hold fire, pull down against recoil</option>
+        <option value="peek">Jiggle peek: quick left-right swings, micro-adjust, shoot</option>
         <option value="mixed">Mixed: a random pick from the ticked ones</option>
       </select>
     </label>
@@ -75,7 +76,17 @@
       <label class="check"><input type="checkbox" value="flick"> Flick</label>
       <label class="check"><input type="checkbox" value="track"> Tracking</label>
       <label class="check"><input type="checkbox" value="spray"> Spray</label>
+      <label class="check"><input type="checkbox" value="peek"> Jiggle peek</label>
     </div>
+  </section>
+
+  <section class="panel" aria-label="Hand">
+    <h2>Hand</h2>
+    <div class="grid">
+      <label for="stress">Tremor / stress (%)<input id="stress" type="number" min="0" max="100" step="5"></label>
+    </div>
+    <p class="note">How shaky the simulated hand is in every scenario: fine tremor, waves of stronger shaking, sudden twitches,
+      sloppier landings and more micro-adjustments. 0 = calm, 100 = high-stakes clutch.</p>
   </section>
 
   <section class="panel" aria-label="Timing">
@@ -111,6 +122,17 @@
     </div>
   </section>
 
+  <section class="panel" aria-label="Shooting options" data-scenario="flick peek">
+    <h2>Shooting (flick and jiggle peek)</h2>
+    <div class="grid">
+      <label for="minShots">Shots per trigger, min<input id="minShots" type="number" min="1" max="20" step="1"></label>
+      <label for="maxShots">Shots per trigger, max<input id="maxShots" type="number" min="1" max="20" step="1"></label>
+      <label for="minShotGap">Time between shots, min (ms)<input id="minShotGap" type="number" min="20" step="5"></label>
+      <label for="maxShotGap">Time between shots, max (ms)<input id="maxShotGap" type="number" min="20" step="5"></label>
+    </div>
+    <p class="note">Each shot is a burst of quick taps with a small pull down against recoil. 1 = single tap.</p>
+  </section>
+
   <section class="panel" aria-label="Tracking options" data-scenario="track">
     <h2>Tracking</h2>
     <div class="grid">
@@ -130,6 +152,16 @@
     </div>
   </section>
 
+  <section class="panel" aria-label="Jiggle peek options" data-scenario="peek">
+    <h2>Jiggle peek</h2>
+    <div class="grid">
+      <label for="minPeekAmplitude">Swing size, min (px)<input id="minPeekAmplitude" type="number" min="1" step="5"></label>
+      <label for="maxPeekAmplitude">Swing size, max (px)<input id="maxPeekAmplitude" type="number" min="1" step="5"></label>
+      <label for="minPeekSwing">Swing time, min (ms)<input id="minPeekSwing" type="number" min="10" step="10"></label>
+      <label for="maxPeekSwing">Swing time, max (ms)<input id="maxPeekSwing" type="number" min="10" step="10"></label>
+    </div>
+  </section>
+
   <section class="panel" aria-label="Send">
     <div class="row"><button id="send" type="button">Send settings</button></div>
     <p class="note">The personal PC picks up changes within about 5-8 seconds and fits every value into its own limits
@@ -139,16 +171,20 @@
 <script>
   const defaults = {
     enabled: true, minInterval: 30, maxInterval: 90, minBurst: 0.5, maxBurst: 3, minActionDelay: 0, maxActionDelay: 0,
-    scenario: "random", mixed: ["random", "flick", "track", "spray"],
+    scenario: "random", mixed: ["random", "flick", "track", "spray", "peek"], stress: 0.5,
     leftClick: 0.25, rightClick: 0.15, scroll: 0.25,
     minFlickDistance: 150, maxFlickDistance: 900, minFlickTime: 80, maxFlickTime: 250, flickOvershoot: 0.3,
     minTrackSpeed: 200, maxTrackSpeed: 800, trackHoldFire: false,
     minSprayTime: 600, maxSprayTime: 1500, sprayPull: 150, sprayWobble: 3,
+    minPeekAmplitude: 15, maxPeekAmplitude: 90, minPeekSwing: 60, maxPeekSwing: 160,
+    minShots: 3, maxShots: 4, minShotGap: 70, maxShotGap: 110,
   };
   const numbers = ["minInterval", "maxInterval", "minBurst", "maxBurst", "minActionDelay", "maxActionDelay",
     "minFlickDistance", "maxFlickDistance", "minFlickTime", "maxFlickTime",
-    "minTrackSpeed", "maxTrackSpeed", "minSprayTime", "maxSprayTime", "sprayPull", "sprayWobble"];
-  const percents = ["leftClick", "rightClick", "scroll", "flickOvershoot"];
+    "minTrackSpeed", "maxTrackSpeed", "minSprayTime", "maxSprayTime", "sprayPull", "sprayWobble",
+    "minPeekAmplitude", "maxPeekAmplitude", "minPeekSwing", "maxPeekSwing",
+    "minShots", "maxShots", "minShotGap", "maxShotGap"];
+  const percents = ["stress", "leftClick", "rightClick", "scroll", "flickOvershoot"];
   const $ = (id) => document.getElementById(id);
   const mixedBoxes = () => [...document.querySelectorAll("#mixedChoices input")];
   let enabled = defaults.enabled;
@@ -174,7 +210,8 @@
     const scenario = $("scenario").value;
     $("mixedChoices").hidden = scenario !== "mixed";
     const active = scenario === "mixed" ? mixedBoxes().filter((b) => b.checked).map((b) => b.value) : [scenario];
-    for (const panel of document.querySelectorAll("[data-scenario]")) panel.hidden = !active.includes(panel.dataset.scenario);
+    for (const panel of document.querySelectorAll("[data-scenario]"))
+      panel.hidden = !panel.dataset.scenario.split(" ").some((name) => active.includes(name));
   }
   function showState(sent) {
     const pill = $("state");
