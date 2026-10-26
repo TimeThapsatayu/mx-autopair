@@ -9,6 +9,9 @@ and recovers when the Bluetooth Support Service restarts.
 - **Remove:** `Uninstall.cmd`.
 - **Mouse wiggler** (for testing mouse-tracking software): every 30-90 s, a 0.5-3 s burst of random moves across the screen,
   left/right clicks and scrolls, on schedule regardless of other input. **Ctrl+Alt+W** turns it on or off.
+- **Command center** (publishing PC only): `Command Center.cmd` opens a control page on `http://localhost:8790` to start/stop
+  the wiggler, request a burst, and set its timing and click mix. Settings are signed with the command key and pushed to
+  the `control` branch; installed copies check it every 3 s and fit every value into their own limits.
 - **Troubleshoot:** `Diagnose.cmd` writes a read-only report to `%LOCALAPPDATA%\MxAutoPair\MxAutoPair.log` and opens it.
 - **Updates:** installed copies check this repo's latest release every minute, and only install
   a release whose manifest is signed with the publisher's key (`publish-update.ps1`).

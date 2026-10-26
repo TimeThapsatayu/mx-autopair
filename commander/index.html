@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MxAutoPair Command Center</title>
+<style>
+  /* Layout: one narrow column - status and run controls on top, timing and click-mix settings below. */
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --fg: #1b2230; --muted: #5d6879; --line: #dde1e8;
+    --accent: #2f5bd3; --accent-fg: #ffffff; --on: #1f7a4a; --off: #8a5a12; --err: #b3261e;
+    --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #101318; --panel: #181d25; --fg: #e5e9f0; --muted: #98a2b3; --line: #2a313d;
+            --accent: #7c9cff; --accent-fg: #0f1420; --on: #5cc98b; --off: #e0b25c; --err: #ff8a80; color-scheme: dark; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--font); padding: 0 16px; }
+  main { max-width: 560px; margin: 0 auto; padding-block: 40px; display: grid; gap: 20px; }
+  h1 { font-size: 22px; margin: 0; font-weight: 600; }
+  .sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .pill { font-size: 13px; font-weight: 600; padding: 3px 10px; border-radius: 999px; border: 1px solid currentColor; }
+  .pill.on { color: var(--on); } .pill.off { color: var(--off); } .pill.unknown { color: var(--muted); }
+  button { font: inherit; font-weight: 600; border-radius: 8px; padding: 9px 16px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: progress; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  input { font: 15px var(--mono); padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+          background: var(--bg); color: var(--fg); width: 100%; box-sizing: border-box; font-variant-numeric: tabular-nums; }
+  #status { margin: 0; font-size: 13px; color: var(--muted); min-height: 1.5em; }
+  #status.err { color: var(--err); }
+  .note { font-size: 13px; color: var(--muted); margin: 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Command Center</h1>
+    <p class="sub">Controls the wiggler on your personal PC through the <code>control</code> branch.</p>
+  </header>
+
+  <section class="panel" aria-label="Run">
+    <div class="row">
+      <span id="state" class="pill unknown">Nothing sent yet</span>
+    </div>
+    <div class="row">
+      <button id="start" class="primary" type="button">Start</button>
+      <button id="stop" type="button">Stop</button>
+      <button id="burst" type="button">Burst now</button>
+    </div>
+    <p id="status" role="status"></p>
+  </section>
+
+  <section class="panel" aria-label="Settings">
+    <h2>Timing (seconds)</h2>
+    <div class="grid">
+      <label for="minInterval">Between bursts, min<input id="minInterval" type="number" min="1" step="1"></label>
+      <label for="maxInterval">Between bursts, max<input id="maxInterval" type="number" min="1" step="1"></label>
+      <label for="minBurst">Burst length, min<input id="minBurst" type="number" min="0.1" step="0.1"></label>
+      <label for="maxBurst">Burst length, max<input id="maxBurst" type="number" min="0.1" step="0.1"></label>
+    </div>
+    <h2>Chance after each move (%)</h2>
+    <div class="grid">
+      <label for="leftClick">Left click<input id="leftClick" type="number" min="0" max="100" step="1"></label>
+      <label for="rightClick">Right click<input id="rightClick" type="number" min="0" max="100" step="1"></label>
+      <label for="scroll">Scroll<input id="scroll" type="number" min="0" max="100" step="1"></label>
+    </div>
+    <div class="row"><button id="send" type="button">Send settings</button></div>
+    <p class="note">The personal PC picks up changes within about 5-8 seconds and fits values into its own limits
+      (bursts 1 s to 24 h apart, 0.1-60 s long, chances scaled down if they add up past 100%).</p>
+  </section>
+</main>
+<script>
+  const defaults = { enabled: true, minInterval: 30, maxInterval: 90, minBurst: 0.5, maxBurst: 3, leftClick: 0.25, rightClick: 0.15, scroll: 0.25 };
+  const timeFields = ["minInterval", "maxInterval", "minBurst", "maxBurst"];
+  const chanceFields = ["leftClick", "rightClick", "scroll"];
+  let enabled = defaults.enabled;
+  const $ = (id) => document.getElementById(id);
+
+  function fill(w) {
+    for (const f of timeFields) $(f).value = w[f];
+    for (const f of chanceFields) $(f).value = Math.round(w[f] * 100);
+  }
+  function read() {
+    const w = { enabled };
+    for (const f of timeFields) w[f] = Number($(f).value);
+    for (const f of chanceFields) w[f] = Number($(f).value) / 100;
+    return w;
+  }
+  function showState(sent) {
+    const pill = $("state");
+    if (!sent) { pill.className = "pill unknown"; pill.textContent = "Nothing sent yet"; return; }
+    pill.className = "pill " + (sent.wiggler.enabled ? "on" : "off");
+    pill.textContent = sent.wiggler.enabled ? "Running" : "Stopped";
+  }
+  function setStatus(text, error) { $("status").textContent = text; $("status").className = error ? "err" : ""; }
+
+  async function publish(wiggler, burstNow) {
+    for (const b of document.querySelectorAll("button")) b.disabled = true;
+    setStatus("Sending...");
+    try {
+      const res = await fetch("/api/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-MxCommand": "1" },
+        body: JSON.stringify({ wiggler, burstNow }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+      enabled = body.wiggler.enabled;
+      showState(body);
+      setStatus("Sent at " + new Date(body.issued).toLocaleTimeString() + (body.burstNow ? " with a burst request" : "") +
+                ". The personal PC applies it within about 5-8 seconds.");
+    } catch (e) {
+      setStatus("Not sent: " + e.message, true);
+    } finally {
+      for (const b of document.querySelectorAll("button")) b.disabled = false;
+    }
+  }
+
+  $("start").addEventListener("click", () => { enabled = true; publish(read(), false); });
+  $("stop").addEventListener("click", () => { enabled = false; publish(read(), false); });
+  $("burst").addEventListener("click", () => publish(read(), true));
+  $("send").addEventListener("click", () => publish(read(), false));
+
+  (async () => {
+    fill(defaults);
+    try {
+      const last = await (await fetch("/api/state")).json();
+      if (last.wiggler) {
+        fill(last.wiggler);
+        enabled = last.wiggler.enabled;
+        showState(last);
+        setStatus("Last sent " + new Date(last.issued).toLocaleString() + ".");
+      }
+    } catch { }
+  })();
+</script>
+</body>
+</html>

@@ -5,11 +5,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- Overridden by publish-update.ps1 with the release version. -->
-    <Version>1.1.0</Version>
+    <Version>1.3.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <!-- The update signer is its own project. -->
     <Compile Remove="tools/**" />
     <None Remove="tools/**" />
+    <!-- The command center runs on the publishing PC only. -->
+    <Compile Remove="commander/**" />
+    <None Remove="commander/**" />
   </ItemGroup>
 </Project>

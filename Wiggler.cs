@@ -1,35 +1,78 @@
-// Mouse wiggler for testing mouse-tracking software: every 30-90s it sends a 0.5-3s burst of random
+// Mouse wiggler for testing mouse-tracking software: on a random interval it sends a burst of random
 // mouse input through SendInput: curved moves to random points across the screen, left and right
 // clicks, and scrolling. Moves are relative (like a real mouse), so raw-input games see them too.
-// Bursts run on schedule regardless of other input. Ctrl+Alt+W turns it on or off; "off" is
-// remembered by a wiggler-off file next to the log.
+// Bursts run on schedule regardless of other input. Timing and click mix come from WigglerSettings,
+// which the command center can change (RemoteControl.cs); Ctrl+Alt+W turns it on or off locally.
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-sealed class Wiggler
+// Every value is already range-checked (WigglerSettings.Normalize) before it gets here.
+sealed record WigglerSettings(
+    bool Enabled, double MinInterval, double MaxInterval, double MinBurst, double MaxBurst,
+    double LeftClick, double RightClick, double Scroll)
 {
-    static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(30), MaxInterval = TimeSpan.FromSeconds(90);
-    static readonly TimeSpan MinBurst = TimeSpan.FromSeconds(0.5), MaxBurst = TimeSpan.FromSeconds(3);
+    public static readonly WigglerSettings Default = new(true, 30, 90, 0.5, 3, 0.25, 0.15, 0.25);
 
-    readonly Action<string> log;
-    readonly string offFlagPath;
-    readonly Random random = new();
-    volatile bool enabled;
-
-    public Wiggler(string dataDir, Action<string> log)
+    // This PC's own limits; whatever a command asks for is fitted into them.
+    public WigglerSettings Normalize()
     {
-        this.log = log;
-        offFlagPath = Path.Combine(dataDir, "wiggler-off");
-        enabled = !File.Exists(offFlagPath);
+        static double Fit(double v, double min, double max, double fallback) =>
+            double.IsFinite(v) ? Math.Clamp(v, min, max) : fallback;
+        double minInterval = Fit(MinInterval, 1, 86400, 30), maxInterval = Fit(MaxInterval, 1, 86400, 90);
+        double minBurst = Fit(MinBurst, 0.1, 60, 0.5), maxBurst = Fit(MaxBurst, 0.1, 60, 3);
+        double left = Fit(LeftClick, 0, 1, 0.25), right = Fit(RightClick, 0, 1, 0.15), scroll = Fit(Scroll, 0, 1, 0.25);
+        var total = left + right + scroll;
+        if (total > 1) { left /= total; right /= total; scroll /= total; }  // they share one roll
+        return new WigglerSettings(Enabled,
+            Math.Min(minInterval, maxInterval), Math.Max(minInterval, maxInterval),
+            Math.Min(minBurst, maxBurst), Math.Max(minBurst, maxBurst), left, right, scroll);
     }
 
-    public static bool IsEnabled(string dataDir) => !File.Exists(Path.Combine(dataDir, "wiggler-off"));
+    public override string ToString() =>
+        $"{(Enabled ? "on" : "off")}, every {MinInterval:0.#}-{MaxInterval:0.#}s, bursts {MinBurst:0.#}-{MaxBurst:0.#}s, " +
+        $"left {LeftClick:0%} / right {RightClick:0%} / scroll {Scroll:0%}";
+}
 
-    public void Start()
+sealed class Wiggler
+{
+    readonly Action<string> log;
+    readonly bool dryRun;  // log bursts instead of sending input (testing)
+    readonly Random random = new();
+    readonly AutoResetEvent wake = new(false);
+    volatile WigglerSettings settings;
+    volatile bool burstRequested;
+
+    public Wiggler(WigglerSettings initial, Action<string> log, bool dryRun = false)
     {
-        log($"Wiggler {(enabled ? "on" : "off")} (Ctrl+Alt+W turns it {(enabled ? "off" : "on")})");
-        new Thread(HotkeyLoop) { IsBackground = true, Name = "Wiggler hotkey" }.Start();
+        settings = initial;
+        this.log = log;
+        this.dryRun = dryRun;
+    }
+
+    public WigglerSettings Settings => settings;
+
+    // Raised when Ctrl+Alt+W changes the settings, so they can be saved.
+    public event Action<WigglerSettings>? LocalChange;
+
+    public void Start(bool hotkey = true)
+    {
+        log($"Wiggler {settings}{(hotkey ? " (Ctrl+Alt+W toggles)" : "")}{(dryRun ? " [dry run]" : "")}");
+        if (hotkey) new Thread(HotkeyLoop) { IsBackground = true, Name = "Wiggler hotkey" }.Start();
         new Thread(RunLoop) { IsBackground = true, Name = "Wiggler" }.Start();
+    }
+
+    // New settings take effect at once: the wait for the next burst restarts with the new interval.
+    public void Apply(WigglerSettings newSettings)
+    {
+        settings = newSettings;
+        wake.Set();
+    }
+
+    // One burst as soon as possible, even while the wiggler is off.
+    public void RequestBurst()
+    {
+        burstRequested = true;
+        wake.Set();
     }
 
     // Sends a zero-length move: checks that input injection works without moving anything.
@@ -39,14 +82,10 @@ sealed class Wiggler
 
     void Toggle()
     {
-        enabled = !enabled;
-        try
-        {
-            if (enabled) File.Delete(offFlagPath);
-            else File.WriteAllText(offFlagPath, "");
-        }
-        catch { }
-        log($"Wiggler turned {(enabled ? "on" : "off")} (Ctrl+Alt+W)");
+        var toggled = settings with { Enabled = !settings.Enabled };
+        Apply(toggled);
+        log($"Wiggler turned {(toggled.Enabled ? "on" : "off")} (Ctrl+Alt+W)");
+        LocalChange?.Invoke(toggled);
     }
 
     void HotkeyLoop()
@@ -62,19 +101,42 @@ sealed class Wiggler
 
     void RunLoop()
     {
+        var next = DateTime.UtcNow + Interval(settings);
         while (true)
         {
-            Thread.Sleep(Between(MinInterval, MaxInterval));
-            if (!enabled) continue;
-            try { Burst(Between(MinBurst, MaxBurst)); }
-            catch (Exception ex) { log($"Wiggler error: {ex.Message}"); }
+            var current = settings;
+            if (burstRequested || (current.Enabled && DateTime.UtcNow >= next))
+            {
+                var requested = burstRequested;
+                burstRequested = false;
+                try { Burst(current, Seconds(current.MinBurst, current.MaxBurst), requested); }
+                catch (Exception ex) { log($"Wiggler error: {ex.Message}"); }
+                next = DateTime.UtcNow + Interval(settings);
+                continue;
+            }
+
+            // Sleep until the next burst is due (or indefinitely while off), waking early for changes.
+            var wait = current.Enabled ? next - DateTime.UtcNow : TimeSpan.FromHours(1);
+            wait = wait < TimeSpan.Zero ? TimeSpan.Zero : wait > TimeSpan.FromHours(1) ? TimeSpan.FromHours(1) : wait;
+            if (wake.WaitOne(wait) && !burstRequested)
+                next = DateTime.UtcNow + Interval(settings);  // settings changed: restart the wait
         }
     }
 
+    TimeSpan Interval(WigglerSettings s) => Seconds(s.MinInterval, s.MaxInterval);
+
+    TimeSpan Seconds(double min, double max) => TimeSpan.FromSeconds(min + (max - min) * random.NextDouble());
+
     TimeSpan Between(TimeSpan min, TimeSpan max) => min + (max - min) * random.NextDouble();
 
-    void Burst(TimeSpan duration)
+    void Burst(WigglerSettings s, TimeSpan duration, bool requested)
     {
+        var label = $"Wiggle {duration.TotalSeconds:0.0}s{(requested ? " (requested)" : "")}";
+        if (dryRun)
+        {
+            log($"{label} [dry run, no input sent]");
+            return;
+        }
         timeBeginPeriod(1);  // 1ms sleeps for smooth movement
         try
         {
@@ -87,11 +149,11 @@ sealed class Wiggler
                 MoveTo(left + random.Next(width), top + random.Next(height), Between(TimeSpan.FromMilliseconds(150), TimeSpan.FromMilliseconds(700)), end);
                 moves++;
                 var roll = random.NextDouble();
-                if (roll < 0.25) { Click(LeftDownFlag, LeftUpFlag); leftClicks++; }
-                else if (roll < 0.40) { Click(RightDownFlag, RightUpFlag); rightClicks++; }
-                else if (roll < 0.65) { Scroll(); scrolls++; }
+                if (roll < s.LeftClick) { Click(LeftDownFlag, LeftUpFlag); leftClicks++; }
+                else if (roll < s.LeftClick + s.RightClick) { Click(RightDownFlag, RightUpFlag); rightClicks++; }
+                else if (roll < s.LeftClick + s.RightClick + s.Scroll) { Scroll(); scrolls++; }
             }
-            log($"Wiggle {duration.TotalSeconds:0.0}s: {moves} moves, {leftClicks} left clicks, {rightClicks} right clicks, {scrolls} scrolls");
+            log($"{label}: {moves} moves, {leftClicks} left clicks, {rightClicks} right clicks, {scrolls} scrolls");
         }
         finally { timeEndPeriod(1); }
     }

@@ -7,7 +7,7 @@
 //   - a connected mouse whose driver was removed: Windows is asked to rescan and reinstall it
 // Run with --diagnose to only log what it finds (no pairing, no changes) and exit.
 // Updates itself from signed GitHub releases (checked every minute); see publish-update.ps1.
-// Also runs the mouse wiggler in Wiggler.cs (Ctrl+Alt+W toggles it).
+// Also runs the mouse wiggler in Wiggler.cs, controlled by the command center via RemoteControl.cs.
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -326,7 +326,8 @@ async Task DiagnoseAsync()
 
     var paired = await GetPairedMatchesAsync();
     var inputCheck = Wiggler.CheckInput();
-    Log($"Wiggler: {(Wiggler.IsEnabled(logDir) ? "on" : "off")}; mouse input {(inputCheck == 0 ? "works" : $"blocked (error {inputCheck})")}");
+    Log($"Mouse input {(inputCheck == 0 ? "works" : $"blocked (error {inputCheck})")}");
+    await new RemoteControl(updateHttp, logDir, Log).DescribeAsync();
     Log($"Paired '{prefix}*' entries: {paired.Count}");
     foreach (var (info, address) in paired)
     {
@@ -457,6 +458,55 @@ if (args.Contains("--update", StringComparer.OrdinalIgnoreCase))
     return;
 }
 
+// Testing: what this PC would make of a control file, without applying it.
+if (args.Length >= 2 && args[0] == "--control-verify")
+{
+    var (instructions, reason) = RemoteControl.Verify(File.ReadAllBytes(args[1]));
+    Log(instructions == null
+        ? $"control-verify: rejected: {reason}"
+        : $"control-verify: OK #{instructions.Seq} issued {instructions.Issued:u}, burstNow={instructions.BurstNow}: wiggler {instructions.Settings}");
+    return;
+}
+
+// Testing: runs the wiggler's scheduler for ~20s with bursts logged instead of sent.
+if (args.Contains("--wiggler-dry-run", StringComparer.OrdinalIgnoreCase))
+{
+    var fast = WigglerSettings.Default with { MinInterval = 1, MaxInterval = 2 };
+    var test = new Wiggler(fast, Log, dryRun: true);
+    test.Start(hotkey: false);
+    Log("TEST t=0: on, every 1-2s");
+    await Task.Delay(5000);
+    test.Apply(fast with { MinInterval = 4, MaxInterval = 4 });
+    Log("TEST t=5: interval changed to 4s (expect next burst at about t=9)");
+    await Task.Delay(5000);
+    test.RequestBurst();
+    Log("TEST t=10: burst requested (expect one at once)");
+    await Task.Delay(1000);
+    test.Apply(fast with { Enabled = false });
+    Log("TEST t=11: off (expect no bursts)");
+    await Task.Delay(4000);
+    test.RequestBurst();
+    Log("TEST t=15: burst requested while off (expect exactly one)");
+    await Task.Delay(2000);
+    test.Apply(fast with { MinInterval = 1, MaxInterval = 1 });
+    Log("TEST t=17: on, every 1s (expect bursts about every second)");
+    await Task.Delay(3500);
+    Log("TEST end");
+    return;
+}
+
+// Testing: polls the control branch for real for ~60s, applying to a dry-run wiggler (no input, no Bluetooth).
+if (args.Contains("--remote-dry-run", StringComparer.OrdinalIgnoreCase))
+{
+    var testRemote = new RemoteControl(updateHttp, logDir, Log);
+    var testWiggler = new Wiggler(testRemote.Settings, Log, dryRun: true);
+    testWiggler.Start(hotkey: false);
+    _ = testRemote.RunAsync(testWiggler);
+    await Task.Delay(TimeSpan.FromSeconds(60));
+    Log($"TEST end: applied #{testRemote.AppliedSeq}, wiggler {testRemote.Settings}");
+    return;
+}
+
 if (diagnose)
 {
     await DiagnoseAsync();
@@ -475,7 +525,10 @@ _ = UpdateLoopAsync(firstUpdateCheck);
 await Task.WhenAny(firstUpdateCheck.Task, Task.Delay(TimeSpan.FromSeconds(15)));
 _ = KeepBluetoothOnAsync();
 _ = RepairLoopAsync();
-new Wiggler(logDir, Log).Start();
+var remote = new RemoteControl(updateHttp, logDir, Log);
+var wiggler = new Wiggler(remote.Settings, Log);
+wiggler.Start();
+_ = remote.RunAsync(wiggler);
 // The watcher is rebuilt when Windows stops it, when a Bluetooth service stops or restarts
 // (e.g. from services.msc), and quietly every 10 minutes, since a watcher can go quiet without notice.
 while (true)
