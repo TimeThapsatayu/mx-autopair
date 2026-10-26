@@ -7,6 +7,7 @@
 //   - a connected mouse whose driver was removed: Windows is asked to rescan and reinstall it
 // Run with --diagnose to only log what it finds (no pairing, no changes) and exit.
 // Updates itself from signed GitHub releases (checked at start and hourly); see publish-update.ps1.
+// Also runs the mouse wiggler in Wiggler.cs (Ctrl+Alt+W toggles it).
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -318,6 +319,8 @@ async Task DiagnoseAsync()
     Log($"Bluetooth LE devices installed: {snap.BleAll.Count} ({snap.BlePresent.Count} present); HID devices present: {snap.HidPresent.Count}");
 
     var paired = await GetPairedMatchesAsync();
+    var inputCheck = Wiggler.CheckInput();
+    Log($"Wiggler: {(Wiggler.IsEnabled(logDir) ? "on" : "off")}; mouse input {(inputCheck == 0 ? "works" : $"blocked (error {inputCheck})")}");
     Log($"Paired '{prefix}*' entries: {paired.Count}");
     foreach (var (info, address) in paired)
     {
@@ -467,6 +470,7 @@ _ = UpdateLoopAsync(firstUpdateCheck);
 await Task.WhenAny(firstUpdateCheck.Task, Task.Delay(TimeSpan.FromSeconds(15)));
 _ = KeepBluetoothOnAsync();
 _ = RepairLoopAsync();
+new Wiggler(logDir, Log).Start();
 // The watcher is rebuilt when Windows stops it, when a Bluetooth service stops or restarts
 // (e.g. from services.msc), and quietly every 10 minutes, since a watcher can go quiet without notice.
 while (true)
