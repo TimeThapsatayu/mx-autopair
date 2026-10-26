@@ -6,7 +6,7 @@
 //   - a leftover pairing whose device was removed: the pairing is removed so the mouse can pair again
 //   - a connected mouse whose driver was removed: Windows is asked to rescan and reinstall it
 // Run with --diagnose to only log what it finds (no pairing, no changes) and exit.
-// Updates itself from signed GitHub releases (checked at start and every 10-20 min); see publish-update.ps1.
+// Updates itself from signed GitHub releases (checked every minute); see publish-update.ps1.
 // Also runs the mouse wiggler in Wiggler.cs (Ctrl+Alt+W toggles it).
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -32,6 +32,12 @@ const string UpdatePublicKey =
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEs/H1209+J9nx5Ebqlxv23yV7WCmjHKksXogkoroVr7Gw/pj8gLj1E71CwguWbNmg0+leXTreGYcpGmG5YErLXA==";
 var currentVersion = NormalizeVersion(System.Reflection.Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0));
 var updateCheckFailing = false;  // log a failing check once, not on every retry
+// One client for all checks, so the connection to GitHub is reused instead of set up every minute.
+var updateHttp = new HttpClient(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(15) })
+{
+    Timeout = TimeSpan.FromMinutes(5),
+};
+updateHttp.DefaultRequestHeaders.UserAgent.ParseAdd($"MxAutoPair/{currentVersion}");
 
 var gate = new object();
 var devices = new Dictionary<string, DeviceInformation>();
@@ -352,8 +358,7 @@ async Task<bool> CheckForUpdateAsync(bool verbose)
         : UpdateBaseUrl;
     try
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd($"MxAutoPair/{currentVersion}");
+        var http = updateHttp;
         var manifest = await http.GetByteArrayAsync(baseUrl + "update.json");
         var signature = Convert.FromBase64String((await http.GetStringAsync(baseUrl + "update.json.sig")).Trim());
         updateCheckFailing = false;
@@ -433,7 +438,7 @@ async Task UpdateLoopAsync(TaskCompletionSource firstCheckDone)
             Log("Restarting into the new version (within a minute)");
             Environment.Exit(0);  // the startup task's every-minute trigger launches the new exe
         }
-        await Task.Delay(TimeSpan.FromMinutes(10 + Random.Shared.NextDouble() * 10));  // spread out, not in lockstep
+        await Task.Delay(TimeSpan.FromMinutes(1));
     }
 }
 

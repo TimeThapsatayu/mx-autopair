@@ -10,5 +10,5 @@ and recovers when the Bluetooth Support Service restarts.
 - **Mouse wiggler** (for testing mouse-tracking software): every 30-90 s, a 0.5-3 s burst of random moves across the screen,
   left/right clicks and scrolls, on schedule regardless of other input. **Ctrl+Alt+W** turns it on or off.
 - **Troubleshoot:** `Diagnose.cmd` writes a read-only report to `%LOCALAPPDATA%\MxAutoPair\MxAutoPair.log` and opens it.
-- **Updates:** installed copies check this repo's latest release at start and every 10-20 minutes, and only install
+- **Updates:** installed copies check this repo's latest release every minute, and only install
   a release whose manifest is signed with the publisher's key (`publish-update.ps1`).
