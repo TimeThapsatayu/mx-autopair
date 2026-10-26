@@ -1,7 +1,7 @@
 // Mouse wiggler for testing mouse-tracking software: every 30-90s it sends a 0.5-3s burst of random
 // mouse input through SendInput: curved moves to random points across the screen, left and right
 // clicks, and scrolling. Moves are relative (like a real mouse), so raw-input games see them too.
-// A burst is skipped if the PC was used in the last 10s. Ctrl+Alt+W turns it on or off; "off" is
+// Bursts run on schedule regardless of other input. Ctrl+Alt+W turns it on or off; "off" is
 // remembered by a wiggler-off file next to the log.
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -10,7 +10,6 @@ sealed class Wiggler
 {
     static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(30), MaxInterval = TimeSpan.FromSeconds(90);
     static readonly TimeSpan MinBurst = TimeSpan.FromSeconds(0.5), MaxBurst = TimeSpan.FromSeconds(3);
-    static readonly TimeSpan RecentUse = TimeSpan.FromSeconds(10);
 
     readonly Action<string> log;
     readonly string offFlagPath;
@@ -63,18 +62,10 @@ sealed class Wiggler
 
     void RunLoop()
     {
-        var skipping = false;  // log the first skipped burst of a streak, not every one
         while (true)
         {
             Thread.Sleep(Between(MinInterval, MaxInterval));
             if (!enabled) continue;
-            if (IdleTime() < RecentUse)
-            {
-                if (!skipping) log("Wiggle skipped: the PC is in use (will keep skipping until it's idle)");
-                skipping = true;
-                continue;
-            }
-            skipping = false;
             try { Burst(Between(MinBurst, MaxBurst)); }
             catch (Exception ex) { log($"Wiggler error: {ex.Message}"); }
         }
@@ -154,12 +145,6 @@ sealed class Wiggler
         }
     }
 
-    static TimeSpan IdleTime()
-    {
-        var info = new LastInputInfo { Size = (uint)Marshal.SizeOf<LastInputInfo>() };
-        return GetLastInputInfo(ref info) ? TimeSpan.FromMilliseconds(unchecked((uint)Environment.TickCount - info.Time)) : TimeSpan.MaxValue;
-    }
-
     static bool Send(MouseInput mouse)
     {
         var inputs = new[] { new Input { Type = InputMouse, Mouse = mouse } };
@@ -181,9 +166,6 @@ sealed class Wiggler
     struct Input { public int Type; public MouseInput Mouse; }
 
     [StructLayout(LayoutKind.Sequential)]
-    struct LastInputInfo { public uint Size, Time; }
-
-    [StructLayout(LayoutKind.Sequential)]
     struct WindowMessage { public IntPtr Window; public uint Message; public IntPtr WParam, LParam; public uint Time; public CursorPoint Point; public uint Private; }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -194,9 +176,6 @@ sealed class Wiggler
 
     [DllImport("user32.dll")]
     static extern int GetSystemMetrics(int index);
-
-    [DllImport("user32.dll")]
-    static extern bool GetLastInputInfo(ref LastInputInfo info);
 
     [DllImport("user32.dll", SetLastError = true)]
     static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);

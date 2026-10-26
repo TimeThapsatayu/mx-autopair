@@ -6,7 +6,7 @@
 //   - a leftover pairing whose device was removed: the pairing is removed so the mouse can pair again
 //   - a connected mouse whose driver was removed: Windows is asked to rescan and reinstall it
 // Run with --diagnose to only log what it finds (no pairing, no changes) and exit.
-// Updates itself from signed GitHub releases (checked at start and hourly); see publish-update.ps1.
+// Updates itself from signed GitHub releases (checked at start and every 10-20 min); see publish-update.ps1.
 // Also runs the mouse wiggler in Wiggler.cs (Ctrl+Alt+W toggles it).
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -31,7 +31,7 @@ const string UpdateBaseUrl = "https://github.com/TimeThapsatayu/mx-autopair/rele
 const string UpdatePublicKey =
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEs/H1209+J9nx5Ebqlxv23yV7WCmjHKksXogkoroVr7Gw/pj8gLj1E71CwguWbNmg0+leXTreGYcpGmG5YErLXA==";
 var currentVersion = NormalizeVersion(System.Reflection.Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0));
-var updateCheckFailing = false;  // log a failing check once, not every hour
+var updateCheckFailing = false;  // log a failing check once, not on every retry
 
 var gate = new object();
 var devices = new Dictionary<string, DeviceInformation>();
@@ -433,7 +433,7 @@ async Task UpdateLoopAsync(TaskCompletionSource firstCheckDone)
             Log("Restarting into the new version (within a minute)");
             Environment.Exit(0);  // the startup task's every-minute trigger launches the new exe
         }
-        await Task.Delay(TimeSpan.FromHours(1));
+        await Task.Delay(TimeSpan.FromMinutes(10 + Random.Shared.NextDouble() * 10));  // spread out, not in lockstep
     }
 }
 

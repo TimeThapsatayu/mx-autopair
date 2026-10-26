@@ -1,5 +1,5 @@
 # Builds MxAutoPair, signs it and publishes it as a GitHub release.
-# Installed copies pick it up within an hour, or at the next sign-in.
+# Installed copies pick it up within 20 minutes, or at the next sign-in.
 #   powershell -ExecutionPolicy Bypass -File .\publish-update.ps1 1.2.0
 param([Parameter(Mandatory)][string]$Version)
 $ErrorActionPreference = 'Stop'
