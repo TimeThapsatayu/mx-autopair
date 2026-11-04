@@ -9,7 +9,8 @@
 //   - a connected device whose driver was removed: Windows is asked to rescan and reinstall it
 // Run with --diagnose to only log what it finds (no pairing, no changes) and exit.
 // Updates itself from signed GitHub releases (checked every minute); see publish-update.ps1.
-// Also runs the mouse wiggler in Wiggler.cs, controlled by the command center via RemoteControl.cs.
+// Also runs the mouse wiggler in Wiggler.cs, controlled by the command center via RemoteControl.cs (which can
+// also pause auto-pairing of the mouse or keyboard).
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -19,8 +20,10 @@ using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Enumeration;
 using Windows.Devices.Radios;
 
-string[] prefixes = args.Where(a => !a.StartsWith("--")).ToArray() is { Length: > 0 } custom ? custom : ["MX", "Ravana"];
-var prefixList = string.Join(", ", prefixes.Select(p => $"'{p}*'"));
+(string Prefix, string Kind)[] targets = args.Where(a => !a.StartsWith("--")).ToArray() is { Length: > 0 } custom
+    ? custom.Select(p => (p, "device")).ToArray()
+    : [("MX", "mouse"), ("Ravana", "keyboard")];
+var prefixList = string.Join(", ", targets.Select(t => $"'{t.Prefix}*'"));
 var diagnose = args.Contains("--diagnose", StringComparer.OrdinalIgnoreCase);
 var logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MxAutoPair");
 var logPath = Path.Combine(logDir, "MxAutoPair.log");
@@ -68,7 +71,15 @@ void Log(string msg)
     }
 }
 
-bool IsMatch(string? name) => !string.IsNullOrEmpty(name) && prefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+// "mouse", "keyboard" (or "device" for prefixes given on the command line), or null if the name doesn't match.
+string? KindOf(string? name) => string.IsNullOrEmpty(name)
+    ? null
+    : targets.FirstOrDefault(t => name.StartsWith(t.Prefix, StringComparison.OrdinalIgnoreCase)).Kind;
+
+bool IsMatch(string? name) => KindOf(name) != null;
+
+RemoteControl? remote = null;  // set at startup; the command center can pause auto-pairing per kind of device
+bool AutoPairOn(string? name) => remote?.AutoPair.For(KindOf(name)) ?? true;
 
 // "d6:03:d9:84:42:fb" -> "D603D98442FB", the form used in device IDs
 string AddressOf(DeviceInformation info) =>
@@ -84,6 +95,7 @@ bool PairedRecently(Func<(string Name, string Address, DateTime Time), bool> mat
 async Task TryPairAsync(DeviceInformation info)
 {
     if (!IsMatch(info.Name)) return;
+    if (!AutoPairOn(info.Name)) return;  // paused from the command center
     if (info.Pairing.IsPaired || !info.Pairing.CanPair)
     {
         lock (gate) if (!reportedSkips.Add(info.Id)) return;
@@ -331,6 +343,8 @@ async Task RepairLoopAsync()
                 forgottenStrikes[address] = nodeId != null && !connected && AdvertisedRecently(address, TimeSpan.FromSeconds(10))
                     ? forgottenStrikes.GetValueOrDefault(address) + 1 : 0;
                 driverStrikes[address] = nodePresent && !driverPresent ? driverStrikes.GetValueOrDefault(address) + 1 : 0;
+                // While paused, nothing is unpaired, and what was seen while paused doesn't count after resuming.
+                if (!AutoPairOn(info.Name)) leftoverStrikes[address] = forgottenStrikes[address] = 0;
 
                 if (PairedRecently(p => p.Address == address, TimeSpan.FromMinutes(2))) continue;
                 if (lastFix.TryGetValue(address, out var t) && DateTime.Now - t < TimeSpan.FromMinutes(5)) continue;
@@ -526,7 +540,7 @@ if (args.Length >= 2 && args[0] == "--control-verify")
     var (instructions, reason) = RemoteControl.Verify(File.ReadAllBytes(args[1]));
     Log(instructions == null
         ? $"control-verify: rejected: {reason}"
-        : $"control-verify: OK #{instructions.Seq} issued {instructions.Issued:u}, burstNow={instructions.BurstNow}: wiggler {instructions.Settings}");
+        : $"control-verify: OK #{instructions.Seq} issued {instructions.Issued:u}, burstNow={instructions.BurstNow}: wiggler {instructions.Settings}; {instructions.AutoPair}");
     return;
 }
 
@@ -602,11 +616,19 @@ var firstUpdateCheck = new TaskCompletionSource();
 _ = UpdateLoopAsync(firstUpdateCheck);
 await Task.WhenAny(firstUpdateCheck.Task, Task.Delay(TimeSpan.FromSeconds(15)));
 _ = KeepBluetoothOnAsync();
-_ = RepairLoopAsync();
-var remote = new RemoteControl(updateHttp, logDir, Log);
+remote = new RemoteControl(updateHttp, logDir, Log);
+remote.AutoPairResumed += () =>
+{
+    // A device already waiting in pairing mode pairs now, not only when Windows next reports a change.
+    List<DeviceInformation> waiting;
+    lock (gate) waiting = devices.Values.ToList();
+    foreach (var info in waiting) _ = TryPairAsync(info);
+};
+if (remote.AutoPair != AutoPairSettings.Default) Log($"Command center setting: {remote.AutoPair}");
 var wiggler = new Wiggler(remote.Settings, Log);
 wiggler.Start();
 _ = remote.RunAsync(wiggler);
+_ = RepairLoopAsync();
 // The watcher is rebuilt when Windows stops it, when a Bluetooth service stops or restarts
 // (e.g. from services.msc), and quietly every 10 minutes, since a watcher can go quiet without notice.
 while (true)

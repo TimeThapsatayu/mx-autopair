@@ -49,6 +49,17 @@
     <p class="sub">Controls the wiggler on your personal PC through the <code>control</code> branch.</p>
   </header>
 
+  <section class="panel" aria-label="Auto-connect">
+    <h2>Auto-connect on the personal PC</h2>
+    <div class="checks">
+      <label class="check"><input id="autoMouse" type="checkbox" checked> Mouse</label>
+      <label class="check"><input id="autoKeyboard" type="checkbox" checked> Keyboard</label>
+    </div>
+    <p class="note">Sent as soon as you tick or untick (within about 5-8 seconds on the personal PC). Unticking pauses
+      auto-pairing and re-pairing for that device; one that's already connected stays connected. Ticking it again
+      resumes, and pairs it right away if it's waiting in pairing mode.</p>
+  </section>
+
   <section class="panel" aria-label="Run">
     <div class="row"><span id="state" class="pill unknown">Nothing sent yet</span></div>
     <div class="row">
@@ -219,6 +230,8 @@
     pill.className = "pill " + (sent.wiggler.enabled ? "on" : "off");
     pill.textContent = sent.wiggler.enabled ? "Running" : "Stopped";
   }
+  function readAutoPair() { return { mouse: $("autoMouse").checked, keyboard: $("autoKeyboard").checked }; }
+  function fillAutoPair(a) { $("autoMouse").checked = a?.mouse !== false; $("autoKeyboard").checked = a?.keyboard !== false; }
   function setStatus(text, error) { $("status").textContent = text; $("status").className = error ? "err" : ""; }
 
   async function publish(wiggler, burstNow) {
@@ -228,11 +241,12 @@
       const res = await fetch("/api/publish", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-MxCommand": "1" },
-        body: JSON.stringify({ wiggler, burstNow }),
+        body: JSON.stringify({ wiggler, burstNow, autoPair: readAutoPair() }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
       enabled = body.wiggler.enabled;
+      fillAutoPair(body.autoPair);
       showState(body);
       setStatus("Sent at " + new Date(body.issued).toLocaleTimeString() + (body.burstNow ? " with a burst request" : "") +
                 ". The personal PC applies it within about 5-8 seconds.");
@@ -249,6 +263,7 @@
   $("stop").addEventListener("click", () => { enabled = false; publish(read(), false); });
   $("burst").addEventListener("click", () => publish(read(), true));
   $("send").addEventListener("click", () => publish(read(), false));
+  for (const id of ["autoMouse", "autoKeyboard"]) $(id).addEventListener("change", () => publish(read(), false));
 
   (async () => {
     fill({});
@@ -257,6 +272,7 @@
       if (last.wiggler) {
         fill(last.wiggler);
         enabled = last.wiggler.enabled;
+        fillAutoPair(last.autoPair);
         showState(last);
         setStatus("Last sent " + new Date(last.issued).toLocaleString() + ".");
       }
