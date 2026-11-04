@@ -1,9 +1,10 @@
 # MxAutoPair
 
-Runs in the background on Windows and pairs Logitech MX Bluetooth mice automatically when they are put in
-pairing mode, so the "Pair device?" prompt doesn't need a click. It also keeps Bluetooth switched on,
-removes leftover pairings and reinstalls a missing mouse driver after a device is removed in Device Manager,
-and recovers when the Bluetooth Support Service restarts.
+Runs in the background on Windows and pairs Logitech MX Bluetooth mice and the Ravana PRO5.0 keyboard
+automatically when they are put in pairing mode, so the "Pair device?" prompt doesn't need a click. It also
+keeps Bluetooth switched on, removes leftover pairings and reinstalls a missing input driver after a device is
+removed in Device Manager, re-pairs a device that has forgotten this PC (it keeps advertising but never
+connects, e.g. after being paired to another PC), and recovers when the Bluetooth Support Service restarts.
 
 - **Install:** unzip a release package and double-click `Install.cmd` (starts at sign-in, relaunches within a minute if closed).
 - **Remove:** `Uninstall.cmd`.

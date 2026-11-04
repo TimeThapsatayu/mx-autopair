@@ -1,10 +1,12 @@
-// Watches for unpaired Bluetooth LE devices whose name starts with a prefix (default "MX")
-// and pairs them automatically, accepting the "Pair device?" confirmation.
-// Only Just Works (ConfirmOnly) pairing is accepted; PIN-based pairing is ignored.
-// Also turns the Bluetooth radio back on whenever it is switched off, and repairs two
-// states that block re-pairing after a device is removed in Device Manager:
-//   - a leftover pairing whose device was removed: the pairing is removed so the mouse can pair again
-//   - a connected mouse whose driver was removed: Windows is asked to rescan and reinstall it
+// Watches for unpaired Bluetooth LE devices whose name starts with one of the prefixes (default "MX"
+// for the mouse and "Ravana" for the keyboard) and pairs them automatically, accepting the
+// "Pair device?" confirmation. Only Just Works (ConfirmOnly) pairing is accepted; PIN-based pairing is ignored.
+// Also turns the Bluetooth radio back on whenever it is switched off, and repairs three
+// states that block re-pairing:
+//   - a leftover pairing whose device was removed in Device Manager: the pairing is removed so it can pair again
+//   - a pairing the device itself forgot (e.g. it was paired to another PC since): it keeps advertising
+//     but never connects, so the old pairing is removed and it is paired again
+//   - a connected device whose driver was removed: Windows is asked to rescan and reinstall it
 // Run with --diagnose to only log what it finds (no pairing, no changes) and exit.
 // Updates itself from signed GitHub releases (checked every minute); see publish-update.ps1.
 // Also runs the mouse wiggler in Wiggler.cs, controlled by the command center via RemoteControl.cs.
@@ -13,10 +15,12 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Windows.Devices.Bluetooth;
+using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Enumeration;
 using Windows.Devices.Radios;
 
-var prefix = args.FirstOrDefault(a => !a.StartsWith("--")) ?? "MX";
+string[] prefixes = args.Where(a => !a.StartsWith("--")).ToArray() is { Length: > 0 } custom ? custom : ["MX", "Ravana"];
+var prefixList = string.Join(", ", prefixes.Select(p => $"'{p}*'"));
 var diagnose = args.Contains("--diagnose", StringComparer.OrdinalIgnoreCase);
 var logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MxAutoPair");
 var logPath = Path.Combine(logDir, "MxAutoPair.log");
@@ -47,6 +51,9 @@ var cooldown = TimeSpan.FromSeconds(20);
 var recentPairs = new List<(string Name, string Address, DateTime Time)>();
 var togglingRadio = false;
 var reportedSkips = new HashSet<string>();  // so each skipped entry is logged once
+var lastAdvertised = new Dictionary<string, DateTime>();  // address -> last connectable advertisement seen
+BluetoothLEAdvertisementWatcher? advertWatcher = null;
+var advertWatcherFailing = false;  // log a failing start once, not on every retry
 
 void Log(string msg)
 {
@@ -61,7 +68,7 @@ void Log(string msg)
     }
 }
 
-bool IsMatch(string? name) => !string.IsNullOrEmpty(name) && name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+bool IsMatch(string? name) => !string.IsNullOrEmpty(name) && prefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
 // "d6:03:d9:84:42:fb" -> "D603D98442FB", the form used in device IDs
 string AddressOf(DeviceInformation info) =>
@@ -83,7 +90,7 @@ async Task TryPairAsync(DeviceInformation info)
         Log($"Saw '{info.Name}' but Windows says it {(info.Pairing.IsPaired ? "is already paired" : "can't be paired right now")}; skipping");
         return;
     }
-    // Other entries for a mouse that just paired would only fail and clutter the log.
+    // Other entries for a device that just paired would only fail and clutter the log.
     if (PairedRecently(p => p.Name == info.Name, TimeSpan.FromSeconds(30))) return;
 
     lock (gate)
@@ -150,6 +157,37 @@ DeviceWatcher CreateWatcher()
     return watcher;
 }
 
+// Listens (without sending anything) for devices advertising that they can be connected to. A paired
+// device that keeps advertising but never connects has forgotten this PC (see RepairLoopAsync).
+// Restarted with the device watcher, and by the repair loop whenever it has stopped.
+void StartAdvertWatcher()
+{
+    try
+    {
+        var old = advertWatcher;
+        advertWatcher = null;
+        if (old?.Status == BluetoothLEAdvertisementWatcherStatus.Started) old.Stop();
+        var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Passive };
+        watcher.Received += (_, e) =>
+        {
+            if (e.IsConnectable) lock (gate) lastAdvertised[$"{e.BluetoothAddress:X12}"] = DateTime.Now;
+        };
+        watcher.Start();
+        advertWatcher = watcher;
+        advertWatcherFailing = false;
+    }
+    catch (Exception ex)  // e.g. Bluetooth is off or its service is restarting
+    {
+        if (!advertWatcherFailing) Log($"Couldn't start listening for advertisements ({ex.Message}); retrying");
+        advertWatcherFailing = true;
+    }
+}
+
+bool AdvertisedRecently(string address, TimeSpan within)
+{
+    lock (gate) return lastAdvertised.TryGetValue(address, out var seen) && DateTime.Now - seen < within;
+}
+
 Radio? bluetoothRadio = null;  // kept so the StateChanged subscription stays alive
 
 async Task EnsureBluetoothOnAsync(Radio radio)
@@ -206,7 +244,7 @@ async Task<List<(DeviceInformation Info, string Address)>> GetPairedMatchesAsync
         .ToList();
 }
 
-// What Windows has installed for one paired mouse.
+// What Windows has installed for one paired device.
 (string? NodeId, bool NodePresent, bool DriverPresent) Inspect(DeviceSnapshot snap, string address)
 {
     bool ForAddress(string id) => id.StartsWith($@"BTHLE\DEV_{address}\", StringComparison.OrdinalIgnoreCase);
@@ -225,23 +263,30 @@ async Task RemoveLeftoverPairingAsync(DeviceInformation info, string address)
 {
     Log($"'{info.Name}' ({address}) is paired but its device was removed; removing the leftover pairing");
     var result = await info.Pairing.UnpairAsync();
-    Log($"  result: {result.Status}. Hold Easy-Switch until it blinks fast to pair again.");
+    Log($"  result: {result.Status}. Put it in pairing mode to pair again.");
+}
+
+async Task RemoveForgottenPairingAsync(DeviceInformation info, string address)
+{
+    Log($"'{info.Name}' ({address}) is paired but keeps advertising without connecting, so it has forgotten this PC; removing the old pairing so it can pair again");
+    var result = await info.Pairing.UnpairAsync();
+    Log($"  result: {result.Status}");  // the device watcher then sees it as unpaired and pairs it
 }
 
 async Task ReinstallDriverAsync(string name, string address, string nodeId, bool reportedConnected)
 {
-    Log($"'{name}' ({address}) is connected but its mouse driver is missing; asking Windows to rescan");
+    Log($"'{name}' ({address}) is connected but its input driver is missing; asking Windows to rescan");
     var cr = DeviceNodes.Rescan(nodeId);
     Log(cr == 0 ? "  rescan requested" : $"  rescan not allowed (CR 0x{cr:X})");
     await Task.Delay(TimeSpan.FromSeconds(10));
     if (DeviceNodes.List("HID", true) is { } hid && hid.Any(id => id.Contains("_" + address, StringComparison.OrdinalIgnoreCase)))
     {
-        Log("  mouse driver is back");
+        Log("  input driver is back");
         return;
     }
     if (!reportedConnected)
     {
-        Log("  still missing, but Windows doesn't report the mouse as connected, so Bluetooth is left alone");
+        Log("  still missing, but Windows doesn't report the device as connected, so Bluetooth is left alone");
         return;
     }
 
@@ -257,14 +302,15 @@ async Task ReinstallDriverAsync(string name, string address, string nodeId, bool
     finally { togglingRadio = false; }
     await Task.Delay(TimeSpan.FromSeconds(15));
     var back = DeviceNodes.List("HID", true)?.Any(id => id.Contains("_" + address, StringComparison.OrdinalIgnoreCase)) == true;
-    Log(back ? "  mouse driver is back" : "  mouse driver still missing; restart the PC or remove the mouse in Settings and pair again");
+    Log(back ? "  input driver is back" : "  input driver still missing; restart the PC or remove the device in Settings and pair again");
 }
 
 // Every 10s. A problem must be seen on several checks in a row before anything is changed,
-// a mouse paired in the last 2 minutes is left alone, and each address gets one fix per 5 minutes.
+// a device paired in the last 2 minutes is left alone, and each address gets one fix per 5 minutes.
 async Task RepairLoopAsync()
 {
     var leftoverStrikes = new Dictionary<string, int>();
+    var forgottenStrikes = new Dictionary<string, int>();
     var driverStrikes = new Dictionary<string, int>();
     var lastFix = new Dictionary<string, DateTime>();
     while (true)
@@ -272,12 +318,18 @@ async Task RepairLoopAsync()
         await Task.Delay(TimeSpan.FromSeconds(10));
         try
         {
+            if (advertWatcher?.Status != BluetoothLEAdvertisementWatcherStatus.Started) StartAdvertWatcher();
             var snap = DeviceSnapshot.Take();
             if (snap == null) continue;  // couldn't read the device list; never act on a partial view
             foreach (var (info, address) in await GetPairedMatchesAsync())
             {
                 var (nodeId, nodePresent, driverPresent) = Inspect(snap, address);
+                var connected = info.Properties.TryGetValue(ConnectedProperty, out var c) && c is true;
                 leftoverStrikes[address] = nodeId == null ? leftoverStrikes.GetValueOrDefault(address) + 1 : 0;
+                // A paired device reconnects within a second or two of advertising; one that is still
+                // advertising and disconnected on 3 checks in a row (20-30s) no longer has the pairing.
+                forgottenStrikes[address] = nodeId != null && !connected && AdvertisedRecently(address, TimeSpan.FromSeconds(10))
+                    ? forgottenStrikes.GetValueOrDefault(address) + 1 : 0;
                 driverStrikes[address] = nodePresent && !driverPresent ? driverStrikes.GetValueOrDefault(address) + 1 : 0;
 
                 if (PairedRecently(p => p.Address == address, TimeSpan.FromMinutes(2))) continue;
@@ -289,11 +341,16 @@ async Task RepairLoopAsync()
                     leftoverStrikes[address] = 0;
                     await RemoveLeftoverPairingAsync(info, address);
                 }
+                else if (forgottenStrikes[address] >= 3)
+                {
+                    lastFix[address] = DateTime.Now;
+                    forgottenStrikes[address] = 0;
+                    await RemoveForgottenPairingAsync(info, address);
+                }
                 else if (driverStrikes[address] >= 2 && nodeId != null)
                 {
                     lastFix[address] = DateTime.Now;
                     driverStrikes[address] = 0;
-                    var connected = info.Properties.TryGetValue(ConnectedProperty, out var c) && c is true;
                     await ReinstallDriverAsync(info.Name, address, nodeId, connected);
                 }
             }
@@ -325,16 +382,21 @@ async Task DiagnoseAsync()
     Log($"Bluetooth LE devices installed: {snap.BleAll.Count} ({snap.BlePresent.Count} present); HID devices present: {snap.HidPresent.Count}");
 
     var paired = await GetPairedMatchesAsync();
+    StartAdvertWatcher();  // only listens for 5s; nothing is sent
+    await Task.Delay(TimeSpan.FromSeconds(5));
+    advertWatcher?.Stop();
+    lock (gate) Log($"Devices heard advertising in 5s: {lastAdvertised.Count}");
     var inputCheck = Wiggler.CheckInput();
     Log($"Mouse input {(inputCheck == 0 ? "works" : $"blocked (error {inputCheck})")}");
     await new RemoteControl(updateHttp, logDir, Log).DescribeAsync();
-    Log($"Paired '{prefix}*' entries: {paired.Count}");
+    Log($"Paired {prefixList} entries: {paired.Count}");
     foreach (var (info, address) in paired)
     {
         var (nodeId, nodePresent, driverPresent) = Inspect(snap, address);
         var connected = info.Properties.TryGetValue(ConnectedProperty, out var c) ? c : "?";
         var device = nodeId == null ? "removed (leftover pairing)" : nodePresent ? "present" : "installed, not present";
-        Log($"  '{info.Name}' {address}: connected={connected}, device={device}, mouse driver={(driverPresent ? "present" : "missing")}");
+        var advertising = AdvertisedRecently(address, TimeSpan.FromSeconds(10)) ? "yes" : "no";
+        Log($"  '{info.Name}' {address}: connected={connected}, advertising={advertising}, device={device}, input driver={(driverPresent ? "present" : "missing")}");
     }
 }
 
@@ -532,7 +594,7 @@ if (diagnose)
 using var mutex = new Mutex(true, @"Local\MxAutoPair", out var isFirstInstance);
 if (!isFirstInstance) return;
 
-Log($"Started v{currentVersion.ToString(3)}, watching for devices named '{prefix}*'");
+Log($"Started v{currentVersion.ToString(3)}, watching for devices named {prefixList}");
 CleanUpOldVersions();
 // The first update check runs before Bluetooth starts, so a release with a Bluetooth bug
 // can still be replaced remotely. It waits at most 15s (e.g. no network yet at sign-in).
@@ -554,6 +616,7 @@ while (true)
     {
         watcher = CreateWatcher();
         watcher.Start();
+        StartAdvertWatcher();
     }
     catch (Exception ex)  // e.g. the Bluetooth service is still starting
     {
