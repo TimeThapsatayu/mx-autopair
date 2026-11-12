@@ -4,8 +4,10 @@
 //   keypress  plays while someone types: each key press (other than Shift/Ctrl/Alt/Win on their own) starts
 //             it or keeps it going; it fades out over KeyHold seconds after the last key and jumps back to
 //             full volume on the next one; when that time runs out it stops and rewinds, so the next key
-//             starts the clip from the beginning. Only the time of a key press is used, never which key.
-// Volume is relative to the Windows volume.
+//             starts the clip from the beginning. Only the time of a key press is used, never which key,
+//             and nothing about typing is logged. A key press also undoes a mute or lowered slider for this
+//             app in the Volume Mixer (AudioSessions.cs), so the set volume applies again.
+// Turning the sound on does that too. Volume is relative to the Windows volume.
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Windows.Media.Core;
@@ -49,7 +51,11 @@ sealed class SignalPlayer(Action<string> log, bool muted = false, bool hookKeys 
                     StopListening();
                     audible = false;
                     player.Volume = settings.Volume;
-                    if (!old.Playing || old.Mode != "loop") player.Play();
+                    if (!old.Playing || old.Mode != "loop")
+                    {
+                        player.Play();
+                        _ = RestoreMixerSoonAsync();  // the mixer entry exists once playback has started
+                    }
                 }
                 else
                 {
@@ -97,9 +103,18 @@ sealed class SignalPlayer(Action<string> log, bool muted = false, bool hookKeys 
     // Keypress mode: follows the time since the last key, about 60 times a second while playing.
     void Follow(CancellationToken stop)
     {
+        var handledKey = Interlocked.Read(ref lastKey);
+        var lastRestore = 0L;
         while (!stop.IsCancellationRequested)
         {
             WaitHandle.WaitAny([wake, stop.WaitHandle], audible ? 15 : Timeout.Infinite);
+            var key = Interlocked.Read(ref lastKey);
+            if (key != handledKey && Environment.TickCount64 - lastRestore >= 250)
+            {
+                handledKey = key;
+                lastRestore = Environment.TickCount64;
+                RestoreMixer();
+            }
             lock (gate)
             {
                 if (stop.IsCancellationRequested || player == null) return;
@@ -116,6 +131,21 @@ sealed class SignalPlayer(Action<string> log, bool muted = false, bool hookKeys 
                 else if (audible) Rewind();
             }
         }
+    }
+
+    void RestoreMixer()
+    {
+        try
+        {
+            if (AudioSessions.Restore() > 0) log("Signal sound: it was muted or turned down in the Volume Mixer; restored");
+        }
+        catch (Exception ex) { log($"Signal sound: couldn't check the Volume Mixer ({ex.Message})"); }
+    }
+
+    async Task RestoreMixerSoonAsync()
+    {
+        await Task.Delay(1000);
+        RestoreMixer();
     }
 
     void StartListening()

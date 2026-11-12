@@ -602,6 +602,21 @@ if (args.Contains("--signal-test", StringComparer.OrdinalIgnoreCase))
     return;
 }
 
+// Testing: plays the signal sound with the player itself muted (silent), mutes this app in the Volume Mixer and
+// lowers its slider, then checks that restoring puts both back.
+if (args.Contains("--unmute-test", StringComparer.OrdinalIgnoreCase))
+{
+    var test = new SignalPlayer(Log, muted: true);
+    test.Apply(new SignalSettings(true, 0.5));
+    await Task.Delay(1500);
+    Log($"unmute-test: playing: {AudioSessions.Describe()}");
+    Log($"unmute-test: muted {AudioSessions.MuteForTest()} session(s): {AudioSessions.Describe()}");
+    Log($"unmute-test: restored {AudioSessions.Restore()} session(s): {AudioSessions.Describe()}");
+    Log($"unmute-test: restoring again changes {AudioSessions.Restore()}");
+    test.Apply(SignalSettings.Default);
+    return;
+}
+
 // Testing: keypress mode, muted, with key presses simulated (no keyboard hook): playing and fading while keys
 // come, back to full volume on a key, stopped and rewound 1.2s after the last one, from the start on the next.
 // Then the real keyboard hook is installed for 3s and removed, to check that Windows allows it.
@@ -618,6 +633,10 @@ if (args.Contains("--keypress-test", StringComparer.OrdinalIgnoreCase))
     await Task.Delay(1000); At("1.05s after it");
     await Task.Delay(500); At("1.55s after it");
     test.OnKey(); await Task.Delay(100); At("key after the stop");
+    Log($"keypress-test: muted in the Volume Mixer: {AudioSessions.MuteForTest()} session(s), {AudioSessions.Describe()}");
+    await Task.Delay(300);
+    test.OnKey(); await Task.Delay(200);
+    Log($"keypress-test: after a key: {AudioSessions.Describe()}");
     test.Apply(SignalSettings.Default);
     At("off");
     var hooked = new SignalPlayer(Log, muted: true);
