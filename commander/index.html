@@ -64,13 +64,19 @@
     <h2>Signal sound on the personal PC</h2>
     <div class="row">
       <span id="signalState" class="pill off">Off</span>
-      <button id="signalToggle" type="button">Play</button>
+      <button id="signalToggle" type="button">Turn on</button>
     </div>
+    <label for="signalMode">Mode
+      <select id="signalMode">
+        <option value="loop">Loop: plays until turned off</option>
+        <option value="keypress">Keypress sound: plays while someone types</option>
+      </select>
+    </label>
     <div class="grid">
       <label for="signalVolume">Volume (%)<input id="signalVolume" type="number" min="0" max="100" step="5" value="50"></label>
+      <label for="signalKeyHold" id="signalKeyHoldLabel">Keeps playing after the last key (s)<input id="signalKeyHold" type="number" min="0.1" max="10" step="0.1" value="1.2"></label>
     </div>
-    <p class="note">Plays miguel.mp3 on a loop until you press Stop. Volume is a share of the personal PC's Windows volume;
-      a change is sent when you leave the box (and applied while it plays).</p>
+    <p class="note" id="signalNote"></p>
   </section>
 
   <section class="panel" aria-label="Run">
@@ -244,13 +250,29 @@
     pill.textContent = sent.wiggler.enabled ? "Running" : "Stopped";
   }
   let signalPlaying = false;
-  function readSignal() { return { playing: signalPlaying, volume: Math.min(100, Math.max(0, Number($("signalVolume").value) || 0)) / 100 }; }
+  function readSignal() {
+    return { playing: signalPlaying, mode: $("signalMode").value,
+             volume: Math.min(100, Math.max(0, Number($("signalVolume").value) || 0)) / 100,
+             keyHold: Math.min(10, Math.max(0.1, Number($("signalKeyHold").value) || 1.2)) };
+  }
+  function showSignal() {
+    const keypress = $("signalMode").value === "keypress";
+    $("signalState").className = "pill " + (signalPlaying ? "on" : "off");
+    $("signalState").textContent = !signalPlaying ? "Off" : keypress ? "On: plays while typing" : "Playing";
+    $("signalToggle").textContent = signalPlaying ? "Turn off" : "Turn on";
+    $("signalKeyHoldLabel").hidden = !keypress;
+    $("signalNote").textContent = keypress
+      ? "Each key press on the personal PC starts miguel.mp3 or keeps it going at the set volume. It fades out over the time " +
+        "after the last key, then stops and rewinds, so the next key starts it from the beginning. Shift, Ctrl, Alt and Win " +
+        "on their own don't count. Volume is a share of the personal PC's Windows volume."
+      : "Plays miguel.mp3 on a loop until you turn it off. Volume is a share of the personal PC's Windows volume.";
+  }
   function fillSignal(sig) {
     signalPlaying = sig?.playing === true;
     if (sig && typeof sig.volume === "number") $("signalVolume").value = Math.round(sig.volume * 100);
-    $("signalState").className = "pill " + (signalPlaying ? "on" : "off");
-    $("signalState").textContent = signalPlaying ? "Playing" : "Off";
-    $("signalToggle").textContent = signalPlaying ? "Stop" : "Play";
+    if (sig && typeof sig.keyHold === "number") $("signalKeyHold").value = sig.keyHold;
+    $("signalMode").value = sig?.mode === "keypress" ? "keypress" : "loop";
+    showSignal();
   }
   function readAutoPair() { return { mouse: $("autoMouse").checked, keyboard: $("autoKeyboard").checked }; }
   function fillAutoPair(a) { $("autoMouse").checked = a?.mouse !== false; $("autoKeyboard").checked = a?.keyboard !== false; }
@@ -288,10 +310,12 @@
   $("send").addEventListener("click", () => publish(read(), false));
   for (const id of ["autoMouse", "autoKeyboard"]) $(id).addEventListener("change", () => publish(read(), false));
   $("signalToggle").addEventListener("click", () => { signalPlaying = !signalPlaying; publish(read(), false); });
-  $("signalVolume").addEventListener("change", () => publish(read(), false));
+  for (const id of ["signalVolume", "signalKeyHold"]) $(id).addEventListener("change", () => publish(read(), false));
+  $("signalMode").addEventListener("change", () => { showSignal(); publish(read(), false); });
 
   (async () => {
     fill({});
+    showSignal();
     try {
       const last = await (await fetch("/api/state")).json();
       if (last.wiggler) {

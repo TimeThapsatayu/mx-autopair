@@ -14,8 +14,9 @@ sealed record ControlInstructions(long Seq, DateTimeOffset Issued, bool BurstNow
                                   SignalSettings Signal);
 
 // The signal sound (SignalPlayer.cs). It plays only when explicitly turned on; volume is 0-1 (of the system
-// volume), 0.5 if missing or not a number.
-sealed record SignalSettings(bool Playing = false, double Volume = 0.5)
+// volume), 0.5 if missing or not a number. Mode "loop" (the default) or "keypress" (plays while typing, for
+// KeyHold seconds after the last key, 0.1-10, default 1.2).
+sealed record SignalSettings(bool Playing = false, double Volume = 0.5, string Mode = "loop", double KeyHold = 1.2)
 {
     public static readonly SignalSettings Default = new();
 
@@ -23,20 +24,28 @@ sealed record SignalSettings(bool Playing = false, double Volume = 0.5)
     {
         if (!root.TryGetProperty("signal", out var s) || s.ValueKind != JsonValueKind.Object) return Default;
         var playing = s.TryGetProperty("playing", out var p) && p.ValueKind == JsonValueKind.True;
-        var volume = s.TryGetProperty("volume", out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d)
-                     && double.IsFinite(d) ? Math.Clamp(d, 0, 1) : Default.Volume;
-        return new(playing, volume);
+        var mode = s.TryGetProperty("mode", out var m) && m.ValueKind == JsonValueKind.String && m.GetString() == "keypress"
+            ? "keypress" : "loop";
+        return new(playing, Number(s, "volume", 0, 1, Default.Volume), mode, Number(s, "keyHold", 0.1, 10, Default.KeyHold));
     }
+
+    static double Number(JsonElement s, string name, double min, double max, double fallback) =>
+        s.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) && double.IsFinite(d)
+            ? Math.Clamp(d, min, max) : fallback;
 
     public void WriteJson(Utf8JsonWriter json)
     {
         json.WriteStartObject("signal");
         json.WriteBoolean("playing", Playing);
         json.WriteNumber("volume", Volume);
+        json.WriteString("mode", Mode);
+        json.WriteNumber("keyHold", KeyHold);
         json.WriteEndObject();
     }
 
-    public override string ToString() => Playing ? $"signal sound on at {Volume:0%}" : "signal sound off";
+    public override string ToString() => !Playing ? "signal sound off"
+        : Mode == "keypress" ? $"signal sound on while typing ({KeyHold:0.0#}s after the last key) at {Volume:0%}"
+        : $"signal sound on, looping at {Volume:0%}";
 }
 
 // Which kinds of device are auto-paired (and re-paired by the repairs). Only an explicit false pauses one,

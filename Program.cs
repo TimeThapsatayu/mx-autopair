@@ -602,6 +602,32 @@ if (args.Contains("--signal-test", StringComparer.OrdinalIgnoreCase))
     return;
 }
 
+// Testing: keypress mode, muted, with key presses simulated (no keyboard hook): playing and fading while keys
+// come, back to full volume on a key, stopped and rewound 1.2s after the last one, from the start on the next.
+// Then the real keyboard hook is installed for 3s and removed, to check that Windows allows it.
+if (args.Contains("--keypress-test", StringComparer.OrdinalIgnoreCase))
+{
+    var test = new SignalPlayer(Log, muted: true, hookKeys: false);
+    test.Apply(new SignalSettings(true, 0.5, "keypress", 1.2));
+    var clock = Stopwatch.StartNew();
+    void At(string what) => Log($"keypress-test t={clock.Elapsed.TotalSeconds:0.0}s {what}: {test.Describe()}");
+    await Task.Delay(500); At("before any key");
+    test.OnKey(); await Task.Delay(100); At("key");
+    await Task.Delay(500); At("0.6s after the key");
+    test.OnKey(); await Task.Delay(50); At("key again");
+    await Task.Delay(1000); At("1.05s after it");
+    await Task.Delay(500); At("1.55s after it");
+    test.OnKey(); await Task.Delay(100); At("key after the stop");
+    test.Apply(SignalSettings.Default);
+    At("off");
+    var hooked = new SignalPlayer(Log, muted: true);
+    hooked.Apply(new SignalSettings(true, 0.5, "keypress", 1.2));
+    await Task.Delay(3000);
+    hooked.Apply(SignalSettings.Default);
+    Log("keypress-test: keyboard hook installed and removed");
+    return;
+}
+
 // Testing: polls the control branch for real for ~60s, applying to a dry-run wiggler (no input, no Bluetooth).
 if (args.Contains("--remote-dry-run", StringComparer.OrdinalIgnoreCase))
 {

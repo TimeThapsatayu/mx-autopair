@@ -14,8 +14,8 @@ connects, e.g. after being paired to another PC), and recovers when the Bluetoot
   whose tremor and twitches scale with a stress setting. Runs on schedule regardless of other input; **Ctrl+Alt+W** toggles it.
 - **Command center** (publishing PC only): `Command Center.cmd` opens a control page on `http://localhost:8790` to start/stop
   the wiggler, request a burst, pick its scenario, timing, action delay and scenario options, pause or resume
-  auto-connect for the mouse and the keyboard, and play or stop the built-in signal sound (`assets/signal.mp3`,
-  looped) at a chosen volume. Settings are signed with the command key and pushed to
+  auto-connect for the mouse and the keyboard, and turn the built-in signal sound (`assets/signal.mp3`) on or off at a chosen volume, either
+  looping or as a keypress sound (plays while someone types, fading out over a set time after the last key). Settings are signed with the command key and pushed to
   the `control` branch; installed copies check it every 3 s and fit every value into their own limits.
 - **Troubleshoot:** `Diagnose.cmd` writes a read-only report to `%LOCALAPPDATA%\MxAutoPair\MxAutoPair.log` and opens it.
 - **Updates:** installed copies check this repo's latest release every minute, and only install

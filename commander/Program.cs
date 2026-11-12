@@ -136,6 +136,10 @@ async Task<(bool Ok, string Json)> PublishAsync(string body)
             json.WriteBoolean("playing", sig.TryGetProperty("playing", out var pl) && pl.ValueKind == JsonValueKind.True);
             json.WriteNumber("volume", sig.TryGetProperty("volume", out var v) && v.TryGetDouble(out var vol) && double.IsFinite(vol)
                 ? Math.Clamp(vol, 0, 1) : 0.5);
+            json.WriteString("mode", sig.TryGetProperty("mode", out var md) && md.ValueKind == JsonValueKind.String
+                && md.GetString() == "keypress" ? "keypress" : "loop");
+            json.WriteNumber("keyHold", sig.TryGetProperty("keyHold", out var kh) && kh.TryGetDouble(out var hold) && double.IsFinite(hold)
+                ? Math.Clamp(hold, 0.1, 10) : 1.2);
             json.WriteEndObject();
         }
         json.WriteEndObject();
