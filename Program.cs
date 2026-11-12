@@ -10,7 +10,7 @@
 // Run with --diagnose to only log what it finds (no pairing, no changes) and exit.
 // Updates itself from signed GitHub releases (checked every minute); see publish-update.ps1.
 // Also runs the mouse wiggler in Wiggler.cs, controlled by the command center via RemoteControl.cs (which can
-// also pause auto-pairing of the mouse or keyboard).
+// also pause auto-pairing of the mouse or keyboard, and play the signal sound in SignalPlayer.cs).
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -540,7 +540,7 @@ if (args.Length >= 2 && args[0] == "--control-verify")
     var (instructions, reason) = RemoteControl.Verify(File.ReadAllBytes(args[1]));
     Log(instructions == null
         ? $"control-verify: rejected: {reason}"
-        : $"control-verify: OK #{instructions.Seq} issued {instructions.Issued:u}, burstNow={instructions.BurstNow}: wiggler {instructions.Settings}; {instructions.AutoPair}");
+        : $"control-verify: OK #{instructions.Seq} issued {instructions.Issued:u}, burstNow={instructions.BurstNow}: wiggler {instructions.Settings}; {instructions.AutoPair}; {instructions.Signal}");
     return;
 }
 
@@ -587,6 +587,21 @@ if (args.Contains("--scenario-dry-run", StringComparer.OrdinalIgnoreCase))
     return;
 }
 
+// Testing: plays the signal sound muted for ~25s (two and a half loops) and logs whether it plays and loops.
+if (args.Contains("--signal-test", StringComparer.OrdinalIgnoreCase))
+{
+    var test = new SignalPlayer(Log, muted: true);
+    test.Apply(new SignalSettings(true, 0.5));
+    for (var i = 0; i < 12; i++)
+    {
+        await Task.Delay(2000);
+        Log($"signal-test: {test.Describe()}");
+    }
+    test.Apply(SignalSettings.Default);
+    Log($"signal-test: after off: {test.Describe()}");
+    return;
+}
+
 // Testing: polls the control branch for real for ~60s, applying to a dry-run wiggler (no input, no Bluetooth).
 if (args.Contains("--remote-dry-run", StringComparer.OrdinalIgnoreCase))
 {
@@ -625,6 +640,9 @@ remote.AutoPairResumed += () =>
     foreach (var info in waiting) _ = TryPairAsync(info);
 };
 if (remote.AutoPair != AutoPairSettings.Default) Log($"Command center setting: {remote.AutoPair}");
+var signalPlayer = new SignalPlayer(Log);
+signalPlayer.Apply(remote.Signal);  // keeps playing after a restart if it was on
+remote.SignalChanged += signalPlayer.Apply;
 var wiggler = new Wiggler(remote.Settings, Log);
 wiggler.Start();
 _ = remote.RunAsync(wiggler);

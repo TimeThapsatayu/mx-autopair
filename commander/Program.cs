@@ -1,6 +1,6 @@
 // MxAutoPair command center (runs on the publishing PC only): a control page on http://localhost:8790
-// that signs wiggler settings (scenario, timing, action delay and per-scenario options) and the auto-pair
-// switches with the command key and force-pushes them as control.json to the repo's "control" branch,
+// that signs wiggler settings (scenario, timing, action delay and per-scenario options), the auto-pair
+// switches and the signal sound switch and volume with the command key and force-pushes them as control.json to the repo's "control" branch,
 // which installed copies check every 3 seconds (RemoteControl.cs).
 // The page only answers this PC: requests must use Host localhost:8790, and changes need a custom
 // header that other websites can't send, so a web page open in the browser can't trigger a publish.
@@ -128,6 +128,14 @@ async Task<(bool Ok, string Json)> PublishAsync(string body)
             json.WriteStartObject("autoPair");
             json.WriteBoolean("mouse", !(a.TryGetProperty("mouse", out var m) && m.ValueKind == JsonValueKind.False));
             json.WriteBoolean("keyboard", !(a.TryGetProperty("keyboard", out var k) && k.ValueKind == JsonValueKind.False));
+            json.WriteEndObject();
+        }
+        if (input.RootElement.TryGetProperty("signal", out var sig) && sig.ValueKind == JsonValueKind.Object)
+        {
+            json.WriteStartObject("signal");
+            json.WriteBoolean("playing", sig.TryGetProperty("playing", out var pl) && pl.ValueKind == JsonValueKind.True);
+            json.WriteNumber("volume", sig.TryGetProperty("volume", out var v) && v.TryGetDouble(out var vol) && double.IsFinite(vol)
+                ? Math.Clamp(vol, 0, 1) : 0.5);
             json.WriteEndObject();
         }
         json.WriteEndObject();

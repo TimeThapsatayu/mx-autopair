@@ -2,14 +2,42 @@
 // ref listing, which isn't cached), and when it changes, fetches control.json from that exact commit.
 // The file must be signed with the command center's key. It can only choose among things this program
 // already does - wiggler on/off, its timing, scenario and their settings, one burst now, pausing auto-pairing
-// of the mouse or keyboard - and this PC fits every value into its own limits (WigglerSettings.Normalize).
+// of the mouse or keyboard, playing the built-in signal sound on a loop and its volume - and this PC fits every
+// value into its own limits (WigglerSettings.Normalize, SignalSettings.FromJson).
 // Unknown fields are ignored; nothing in it is run.
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
-sealed record ControlInstructions(long Seq, DateTimeOffset Issued, bool BurstNow, WigglerSettings Settings, AutoPairSettings AutoPair);
+sealed record ControlInstructions(long Seq, DateTimeOffset Issued, bool BurstNow, WigglerSettings Settings, AutoPairSettings AutoPair,
+                                  SignalSettings Signal);
+
+// The signal sound (SignalPlayer.cs). It plays only when explicitly turned on; volume is 0-1 (of the system
+// volume), 0.5 if missing or not a number.
+sealed record SignalSettings(bool Playing = false, double Volume = 0.5)
+{
+    public static readonly SignalSettings Default = new();
+
+    public static SignalSettings FromJson(JsonElement root)
+    {
+        if (!root.TryGetProperty("signal", out var s) || s.ValueKind != JsonValueKind.Object) return Default;
+        var playing = s.TryGetProperty("playing", out var p) && p.ValueKind == JsonValueKind.True;
+        var volume = s.TryGetProperty("volume", out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d)
+                     && double.IsFinite(d) ? Math.Clamp(d, 0, 1) : Default.Volume;
+        return new(playing, volume);
+    }
+
+    public void WriteJson(Utf8JsonWriter json)
+    {
+        json.WriteStartObject("signal");
+        json.WriteBoolean("playing", Playing);
+        json.WriteNumber("volume", Volume);
+        json.WriteEndObject();
+    }
+
+    public override string ToString() => Playing ? $"signal sound on at {Volume:0%}" : "signal sound off";
+}
 
 // Which kinds of device are auto-paired (and re-paired by the repairs). Only an explicit false pauses one,
 // so a missing or odd value keeps auto-pairing on, as it was before this setting existed.
@@ -55,6 +83,7 @@ sealed class RemoteControl
     long appliedSeq;
     WigglerSettings settings;
     AutoPairSettings autoPair;
+    SignalSettings signal;
     string? lastSha;
 
     public RemoteControl(HttpClient http, string dataDir, Action<string> log)
@@ -62,11 +91,14 @@ sealed class RemoteControl
         this.http = http;
         this.log = log;
         statePath = Path.Combine(dataDir, "control-state.json");
-        (appliedSeq, settings, autoPair) = LoadState(statePath, dataDir);
+        (appliedSeq, settings, autoPair, signal) = LoadState(statePath, dataDir);
     }
 
     public WigglerSettings Settings { get { lock (gate) return settings; } }
     public AutoPairSettings AutoPair { get { lock (gate) return autoPair; } }
+    public SignalSettings Signal { get { lock (gate) return signal; } }
+    // Raised when the command center changes the signal sound (on/off or volume).
+    public event Action<SignalSettings>? SignalChanged;
     // Raised when the command center turns auto-pairing of a kind of device back on.
     public event Action? AutoPairResumed;
     public long AppliedSeq { get { lock (gate) return appliedSeq; } }
@@ -105,6 +137,7 @@ sealed class RemoteControl
         var (instructions, reason) = Verify(await GetControlFileAsync(sha));
         lastSha = sha;
         AutoPairSettings previous;
+        SignalSettings previousSignal;
         if (instructions == null)
         {
             log($"Remote control: ignored commit {sha[..7]}: {reason}");
@@ -121,14 +154,17 @@ sealed class RemoteControl
             settings = instructions.Settings;
             previous = autoPair;
             autoPair = instructions.AutoPair;
+            previousSignal = signal;
+            signal = instructions.Signal;
         }
         SaveState();
         wiggler.Apply(instructions.Settings);
         var burst = instructions.BurstNow && DateTimeOffset.UtcNow - instructions.Issued < BurstFreshness;
         if (burst) wiggler.RequestBurst();
-        log($"Remote control: applied #{instructions.Seq}: wiggler {instructions.Settings}{(burst ? "; burst now" : "")}; {instructions.AutoPair}");
+        log($"Remote control: applied #{instructions.Seq}: wiggler {instructions.Settings}{(burst ? "; burst now" : "")}; {instructions.AutoPair}; {instructions.Signal}");
         if ((instructions.AutoPair.Mouse && !previous.Mouse) || (instructions.AutoPair.Keyboard && !previous.Keyboard))
             AutoPairResumed?.Invoke();
+        if (instructions.Signal != previousSignal) SignalChanged?.Invoke(instructions.Signal);
     }
 
     // The commit the control branch points to, or null if there is no such branch.
@@ -164,7 +200,8 @@ sealed class RemoteControl
             var issued = root.TryGetProperty("issued", out var i) && i.TryGetDateTimeOffset(out var at) ? at : DateTimeOffset.MinValue;
             var burstNow = root.TryGetProperty("burstNow", out var b) && b.ValueKind == JsonValueKind.True;
             var settings = WigglerSettings.FromJson(root.GetProperty("wiggler"));
-            return (new ControlInstructions(seq, issued, burstNow, settings, AutoPairSettings.FromJson(root)), "ok");
+            return (new ControlInstructions(seq, issued, burstNow, settings, AutoPairSettings.FromJson(root),
+                SignalSettings.FromJson(root)), "ok");
         }
         catch (Exception ex) when (ex is JsonException or FormatException or KeyNotFoundException or InvalidOperationException)
         {
@@ -175,7 +212,7 @@ sealed class RemoteControl
     // For --diagnose: what's on the branch and what this PC would do with it, without applying it.
     public async Task DescribeAsync()
     {
-        log($"Remote control: last applied #{AppliedSeq}; wiggler {Settings}; {AutoPair}");
+        log($"Remote control: last applied #{AppliedSeq}; wiggler {Settings}; {AutoPair}; {Signal}");
         try
         {
             var sha = await GetControlShaAsync();
@@ -188,25 +225,26 @@ sealed class RemoteControl
             if (instructions == null) log($"Remote control: branch at {sha[..7]}, would ignore it: {reason}");
             else log($"Remote control: branch at {sha[..7]}, #{instructions.Seq} signed OK, " +
                      (instructions.Seq > AppliedSeq ? "would apply" : "already applied or older") +
-                     $": wiggler {instructions.Settings}{(instructions.BurstNow ? "; burst now requested" : "")}; {instructions.AutoPair}");
+                     $": wiggler {instructions.Settings}{(instructions.BurstNow ? "; burst now requested" : "")}; {instructions.AutoPair}; {instructions.Signal}");
         }
         catch (Exception ex) { log($"Remote control: couldn't check ({ex.Message})"); }
     }
 
-    static (long Seq, WigglerSettings Settings, AutoPairSettings AutoPair) LoadState(string path, string dataDir)
+    static (long Seq, WigglerSettings Settings, AutoPairSettings AutoPair, SignalSettings Signal) LoadState(string path, string dataDir)
     {
         try
         {
             using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
             var root = doc.RootElement;
             var settings = WigglerSettings.FromJson(root.GetProperty("wiggler"));
-            return (root.GetProperty("appliedSeq").GetInt64(), settings, AutoPairSettings.FromJson(root));
+            return (root.GetProperty("appliedSeq").GetInt64(), settings, AutoPairSettings.FromJson(root),
+                    SignalSettings.FromJson(root));
         }
         catch
         {
             // First run (or unreadable state): defaults, honouring the old Ctrl+Alt+W "off" marker.
             var off = File.Exists(Path.Combine(dataDir, "wiggler-off"));
-            return (0, WigglerSettings.Default with { Enabled = !off }, AutoPairSettings.Default);
+            return (0, WigglerSettings.Default with { Enabled = !off }, AutoPairSettings.Default, SignalSettings.Default);
         }
     }
 
@@ -215,7 +253,8 @@ sealed class RemoteControl
         long seq;
         WigglerSettings s;
         AutoPairSettings a;
-        lock (gate) (seq, s, a) = (appliedSeq, settings, autoPair);
+        SignalSettings sig;
+        lock (gate) (seq, s, a, sig) = (appliedSeq, settings, autoPair, signal);
         try
         {
             using var stream = new MemoryStream();
@@ -226,6 +265,7 @@ sealed class RemoteControl
                 json.WritePropertyName("wiggler");
                 s.WriteJson(json);
                 a.WriteJson(json);
+                sig.WriteJson(json);
                 json.WriteEndObject();
             }
             var temp = statePath + ".tmp";

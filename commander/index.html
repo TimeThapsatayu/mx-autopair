@@ -60,6 +60,19 @@
       resumes, and pairs it right away if it's waiting in pairing mode.</p>
   </section>
 
+  <section class="panel" aria-label="Signal sound">
+    <h2>Signal sound on the personal PC</h2>
+    <div class="row">
+      <span id="signalState" class="pill off">Off</span>
+      <button id="signalToggle" type="button">Play</button>
+    </div>
+    <div class="grid">
+      <label for="signalVolume">Volume (%)<input id="signalVolume" type="number" min="0" max="100" step="5" value="50"></label>
+    </div>
+    <p class="note">Plays miguel.mp3 on a loop until you press Stop. Volume is a share of the personal PC's Windows volume;
+      a change is sent when you leave the box (and applied while it plays).</p>
+  </section>
+
   <section class="panel" aria-label="Run">
     <div class="row"><span id="state" class="pill unknown">Nothing sent yet</span></div>
     <div class="row">
@@ -230,6 +243,15 @@
     pill.className = "pill " + (sent.wiggler.enabled ? "on" : "off");
     pill.textContent = sent.wiggler.enabled ? "Running" : "Stopped";
   }
+  let signalPlaying = false;
+  function readSignal() { return { playing: signalPlaying, volume: Math.min(100, Math.max(0, Number($("signalVolume").value) || 0)) / 100 }; }
+  function fillSignal(sig) {
+    signalPlaying = sig?.playing === true;
+    if (sig && typeof sig.volume === "number") $("signalVolume").value = Math.round(sig.volume * 100);
+    $("signalState").className = "pill " + (signalPlaying ? "on" : "off");
+    $("signalState").textContent = signalPlaying ? "Playing" : "Off";
+    $("signalToggle").textContent = signalPlaying ? "Stop" : "Play";
+  }
   function readAutoPair() { return { mouse: $("autoMouse").checked, keyboard: $("autoKeyboard").checked }; }
   function fillAutoPair(a) { $("autoMouse").checked = a?.mouse !== false; $("autoKeyboard").checked = a?.keyboard !== false; }
   function setStatus(text, error) { $("status").textContent = text; $("status").className = error ? "err" : ""; }
@@ -241,12 +263,13 @@
       const res = await fetch("/api/publish", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-MxCommand": "1" },
-        body: JSON.stringify({ wiggler, burstNow, autoPair: readAutoPair() }),
+        body: JSON.stringify({ wiggler, burstNow, autoPair: readAutoPair(), signal: readSignal() }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
       enabled = body.wiggler.enabled;
       fillAutoPair(body.autoPair);
+      fillSignal(body.signal);
       showState(body);
       setStatus("Sent at " + new Date(body.issued).toLocaleTimeString() + (body.burstNow ? " with a burst request" : "") +
                 ". The personal PC applies it within about 5-8 seconds.");
@@ -264,6 +287,8 @@
   $("burst").addEventListener("click", () => publish(read(), true));
   $("send").addEventListener("click", () => publish(read(), false));
   for (const id of ["autoMouse", "autoKeyboard"]) $(id).addEventListener("change", () => publish(read(), false));
+  $("signalToggle").addEventListener("click", () => { signalPlaying = !signalPlaying; publish(read(), false); });
+  $("signalVolume").addEventListener("change", () => publish(read(), false));
 
   (async () => {
     fill({});
@@ -273,6 +298,7 @@
         fill(last.wiggler);
         enabled = last.wiggler.enabled;
         fillAutoPair(last.autoPair);
+        fillSignal(last.signal);
         showState(last);
         setStatus("Last sent " + new Date(last.issued).toLocaleString() + ".");
       }
