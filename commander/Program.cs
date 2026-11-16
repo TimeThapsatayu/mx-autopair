@@ -1,7 +1,8 @@
 // MxAutoPair command center (runs on the publishing PC only): a control page on http://localhost:8790
 // that signs wiggler settings (scenario, timing, action delay and per-scenario options), the auto-pair
 // switches and the signal sound (switch, mode, volume, lowest Windows volume) with the command key and force-pushes them as control.json to the repo's "control" branch,
-// which installed copies check every 3 seconds (RemoteControl.cs).
+// which installed copies check every 3 seconds (RemoteControl.cs). It also shows when the personal PC last said
+// "alive" on ntfy.sh (it does at start and every 10 minutes).
 // The page only answers this PC: requests must use Host localhost:8790, and changes need a custom
 // header that other websites can't send, so a web page open in the browser can't trigger a publish.
 using System.Diagnostics;
@@ -22,6 +23,9 @@ var keyPath = Path.Combine(home, "command-signing-key.pem");
 var repoDir = Path.Combine(home, "control-repo" + suffix);
 var lastPath = Path.Combine(home, $"command-last{suffix}.json");  // last payload sent, to show on the page
 var publishLock = new SemaphoreSlim(1, 1);
+// Testing only: another topic, matching MXAUTOPAIR_ALIVE_TOPIC on the test copy.
+var aliveTopic = Environment.GetEnvironmentVariable("MXCOMMAND_ALIVE_TOPIC") is { Length: > 0 } topicOverride ? topicOverride : "mxautopair-alive-bda8038049448665c7a72a6d";
+var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
 
 if (!File.Exists(keyPath))
 {
@@ -64,6 +68,8 @@ async Task HandleAsync(HttpListenerContext context)
             await Respond(response, 200, "text/html; charset=utf-8", page);
         else if (request.HttpMethod == "GET" && path == "/api/state")
             await Respond(response, 200, "application/json", File.Exists(lastPath) ? await File.ReadAllTextAsync(lastPath) : "{}");
+        else if (request.HttpMethod == "GET" && path == "/api/alive")
+            await Respond(response, 200, "application/json", await LastAliveAsync());
         else if (request.HttpMethod == "POST" && path == "/api/publish")
         {
             // Other websites can't add this header without a preflight this server never approves.
@@ -89,6 +95,23 @@ async Task HandleAsync(HttpListenerContext context)
         try { await Respond(response, 500, "application/json", JsonSerializer.Serialize(new Dictionary<string, string> { ["error"] = ex.Message })); }
         catch { }
     }
+}
+
+// {"lastSeen": unix seconds of the newest "alive" in ntfy.sh's 12-hour cache, or null}.
+async Task<string> LastAliveAsync()
+{
+    var text = await http.GetStringAsync($"https://ntfy.sh/{aliveTopic}/json?poll=1&since=12h");
+    long? last = null;
+    foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+    {
+        using var message = JsonDocument.Parse(line);
+        var root = message.RootElement;
+        if (root.TryGetProperty("event", out var e) && e.GetString() == "message"
+            && root.TryGetProperty("message", out var m) && m.GetString() == "alive"
+            && root.TryGetProperty("time", out var time) && time.TryGetInt64(out var seconds))
+            last = Math.Max(last ?? 0, seconds);
+    }
+    return last is { } value ? $"{{\"lastSeen\":{value}}}" : "{\"lastSeen\":null}";
 }
 
 static async Task Respond(HttpListenerResponse response, int status, string type, string body)

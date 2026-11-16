@@ -11,6 +11,8 @@
 // Updates itself from signed GitHub releases (checked every minute); see publish-update.ps1.
 // Also runs the mouse wiggler in Wiggler.cs, controlled by the command center via RemoteControl.cs (which can
 // also pause auto-pairing of the mouse or keyboard, and play the signal sound in SignalPlayer.cs).
+// Says "alive" on ntfy.sh at start and every 10 minutes, so the command center can tell it's running (nothing else
+// is sent, and nothing is received that way).
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -37,6 +39,9 @@ const string ConnectedProperty = "System.Devices.Aep.IsConnected";
 const string UpdateBaseUrl = "https://github.com/TimeThapsatayu/mx-autopair/releases/latest/download/";
 const string UpdatePublicKey =
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEs/H1209+J9nx5Ebqlxv23yV7WCmjHKksXogkoroVr7Gw/pj8gLj1E71CwguWbNmg0+leXTreGYcpGmG5YErLXA==";
+// "I'm alive" for the command center: the word "alive" posted to this ntfy.sh topic (no account; ntfy.sh allows 250
+// messages a day). MXAUTOPAIR_ALIVE_TOPIC overrides it for testing, so a test never posts to the real topic.
+var aliveTopic = Environment.GetEnvironmentVariable("MXAUTOPAIR_ALIVE_TOPIC") is { Length: > 0 } topicOverride ? topicOverride : "mxautopair-alive-bda8038049448665c7a72a6d";
 var currentVersion = NormalizeVersion(System.Reflection.Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0));
 var updateCheckFailing = false;  // log a failing check once, not on every retry
 // One client for all checks, so the connection to GitHub is reused instead of set up every minute.
@@ -319,6 +324,32 @@ async Task ReinstallDriverAsync(string name, string address, string nodeId, bool
 
 // Every 10s. A problem must be seen on several checks in a row before anything is changed,
 // a device paired in the last 2 minutes is left alone, and each address gets one fix per 5 minutes.
+async Task PostAliveAsync()
+{
+    using var response = await updateHttp.PostAsync($"https://ntfy.sh/{aliveTopic}", new StringContent("alive"));
+    response.EnsureSuccessStatusCode();
+}
+
+async Task AliveLoopAsync()
+{
+    var failing = false;  // log a failing post once, not every 10 minutes
+    while (true)
+    {
+        try
+        {
+            await PostAliveAsync();
+            if (failing) Log("Alive signal: working again");
+            failing = false;
+        }
+        catch (Exception ex)
+        {
+            if (!failing) Log($"Alive signal: couldn't post ({ex.Message}); trying again every 10 minutes");
+            failing = true;
+        }
+        await Task.Delay(TimeSpan.FromMinutes(10));
+    }
+}
+
 async Task RepairLoopAsync()
 {
     var leftoverStrikes = new Dictionary<string, int>();
@@ -664,6 +695,19 @@ if (args.Contains("--keypress-test", StringComparer.OrdinalIgnoreCase))
     return;
 }
 
+// Testing: posts "alive" once to a test topic (MXAUTOPAIR_ALIVE_TOPIC must be set, so it never reaches the real one).
+if (args.Contains("--alive-test", StringComparer.OrdinalIgnoreCase))
+{
+    if (Environment.GetEnvironmentVariable("MXAUTOPAIR_ALIVE_TOPIC") is not { Length: > 0 })
+        Log("alive-test: set MXAUTOPAIR_ALIVE_TOPIC to a test topic first");
+    else
+    {
+        try { await PostAliveAsync(); Log($"alive-test: posted to {aliveTopic}"); }
+        catch (Exception ex) { Log($"alive-test: failed ({ex.Message})"); }
+    }
+    return;
+}
+
 // Testing: polls the control branch for real for ~60s, applying to a dry-run wiggler (no input, no Bluetooth).
 if (args.Contains("--remote-dry-run", StringComparer.OrdinalIgnoreCase))
 {
@@ -686,6 +730,7 @@ using var mutex = new Mutex(true, @"Local\MxAutoPair", out var isFirstInstance);
 if (!isFirstInstance) return;
 
 Log($"Started v{currentVersion.ToString(3)}, watching for devices named {prefixList}");
+_ = AliveLoopAsync();
 CleanUpOldVersions();
 // The first update check runs before Bluetooth starts, so a release with a Bluetooth bug
 // can still be replaced remotely. It waits at most 15s (e.g. no network yet at sign-in).

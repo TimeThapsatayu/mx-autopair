@@ -49,6 +49,14 @@
     <p class="sub">Controls the wiggler on your personal PC through the <code>control</code> branch.</p>
   </header>
 
+  <section class="panel" aria-label="Personal PC">
+    <h2>Personal PC</h2>
+    <div class="row"><span id="alive" class="pill unknown">Checking...</span></div>
+    <p class="note">The app on the personal PC says "alive" when it starts and every 10 minutes. Nothing for over 12 minutes
+      means the PC is off, asleep or offline, or the app isn't running (if it's closed, it restarts itself within a minute).
+      Checked every minute.</p>
+  </section>
+
   <section class="panel" aria-label="Auto-connect">
     <h2>Auto-connect on the personal PC</h2>
     <div class="checks">
@@ -318,6 +326,28 @@
   $("signalToggle").addEventListener("click", () => { signalPlaying = !signalPlaying; publish(read(), false); });
   for (const id of ["signalVolume", "signalKeyHold", "signalSystemMin"]) $(id).addEventListener("change", () => publish(read(), false));
   $("signalMode").addEventListener("change", () => { showSignal(); publish(read(), false); });
+
+  function ago(seconds) {
+    const minutes = Math.round(seconds / 60);
+    return minutes < 1 ? "just now" : minutes < 90 ? minutes + " min ago" : Math.round(minutes / 60) + " h ago";
+  }
+  async function checkAlive() {
+    const pill = $("alive");
+    try {
+      const body = await (await fetch("/api/alive")).json();
+      if (typeof body.lastSeen !== "number") {
+        pill.className = "pill off"; pill.textContent = "Not heard from in the last 12 h";
+        return;
+      }
+      const age = Date.now() / 1000 - body.lastSeen;
+      pill.className = "pill " + (age <= 12 * 60 ? "on" : "off");
+      pill.textContent = (age <= 12 * 60 ? "Alive, last heard " : "Not heard from since ") + ago(age);
+    } catch {
+      pill.className = "pill unknown"; pill.textContent = "Can't check right now";
+    }
+  }
+  checkAlive();
+  setInterval(checkAlive, 60000);
 
   (async () => {
     fill({});

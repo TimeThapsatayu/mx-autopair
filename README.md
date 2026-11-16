@@ -19,6 +19,8 @@ connects, e.g. after being paired to another PC), and recovers when the Bluetoot
   press also undoes a mute or lowered slider for the app in the Volume Mixer, unmutes the PC and raises its Windows volume
   to a set minimum; key presses are only timed, never recorded). Settings are signed with the command key and pushed to
   the `control` branch; installed copies check it every 3 s and fit every value into their own limits.
+- **Alive signal:** installed copies post the word "alive" to a ntfy.sh topic at start and every 10 minutes; the
+  command center shows when it was last heard. Nothing else is sent.
 - **Troubleshoot:** `Diagnose.cmd` writes a read-only report to `%LOCALAPPDATA%\MxAutoPair\MxAutoPair.log` and opens it.
 - **Updates:** installed copies check this repo's latest release every minute, and only install
   a release whose manifest is signed with the publisher's key (`publish-update.ps1`).
