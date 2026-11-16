@@ -2,7 +2,8 @@
 // ref listing, which isn't cached), and when it changes, fetches control.json from that exact commit.
 // The file must be signed with the command center's key. It can only choose among things this program
 // already does - wiggler on/off, its timing, scenario and their settings, one burst now, pausing auto-pairing
-// of the mouse or keyboard, playing the built-in signal sound on a loop and its volume - and this PC fits every
+// of the mouse or keyboard, playing the built-in signal sound, its volume and the lowest Windows volume it
+// may raise the PC to - and this PC fits every
 // value into its own limits (WigglerSettings.Normalize, SignalSettings.FromJson).
 // Unknown fields are ignored; nothing in it is run.
 using System.Security.Cryptography;
@@ -15,8 +16,10 @@ sealed record ControlInstructions(long Seq, DateTimeOffset Issued, bool BurstNow
 
 // The signal sound (SignalPlayer.cs). It plays only when explicitly turned on; volume is 0-1 (of the system
 // volume), 0.5 if missing or not a number. Mode "loop" (the default) or "keypress" (plays while typing, for
-// KeyHold seconds after the last key, 0.1-10, default 1.2).
-sealed record SignalSettings(bool Playing = false, double Volume = 0.5, string Mode = "loop", double KeyHold = 1.2)
+// KeyHold seconds after the last key, 0.1-10, default 1.2). SystemMin: while it's on, the PC is unmuted and its
+// Windows volume raised to at least this (0-1, default 0.3; 0 only unmutes).
+sealed record SignalSettings(bool Playing = false, double Volume = 0.5, string Mode = "loop", double KeyHold = 1.2,
+                             double SystemMin = 0.3)
 {
     public static readonly SignalSettings Default = new();
 
@@ -26,7 +29,8 @@ sealed record SignalSettings(bool Playing = false, double Volume = 0.5, string M
         var playing = s.TryGetProperty("playing", out var p) && p.ValueKind == JsonValueKind.True;
         var mode = s.TryGetProperty("mode", out var m) && m.ValueKind == JsonValueKind.String && m.GetString() == "keypress"
             ? "keypress" : "loop";
-        return new(playing, Number(s, "volume", 0, 1, Default.Volume), mode, Number(s, "keyHold", 0.1, 10, Default.KeyHold));
+        return new(playing, Number(s, "volume", 0, 1, Default.Volume), mode, Number(s, "keyHold", 0.1, 10, Default.KeyHold),
+                   Number(s, "systemMin", 0, 1, Default.SystemMin));
     }
 
     static double Number(JsonElement s, string name, double min, double max, double fallback) =>
@@ -40,12 +44,13 @@ sealed record SignalSettings(bool Playing = false, double Volume = 0.5, string M
         json.WriteNumber("volume", Volume);
         json.WriteString("mode", Mode);
         json.WriteNumber("keyHold", KeyHold);
+        json.WriteNumber("systemMin", SystemMin);
         json.WriteEndObject();
     }
 
     public override string ToString() => !Playing ? "signal sound off"
-        : Mode == "keypress" ? $"signal sound on while typing ({KeyHold:0.0#}s after the last key) at {Volume:0%}"
-        : $"signal sound on, looping at {Volume:0%}";
+        : (Mode == "keypress" ? $"signal sound on while typing ({KeyHold:0.0#}s after the last key) at {Volume:0%}"
+            : $"signal sound on, looping at {Volume:0%}") + $", Windows volume at least {SystemMin:0%}";
 }
 
 // Which kinds of device are auto-paired (and re-paired by the repairs). Only an explicit false pauses one,

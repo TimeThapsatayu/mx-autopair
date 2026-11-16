@@ -1,6 +1,6 @@
 // MxAutoPair command center (runs on the publishing PC only): a control page on http://localhost:8790
 // that signs wiggler settings (scenario, timing, action delay and per-scenario options), the auto-pair
-// switches and the signal sound switch and volume with the command key and force-pushes them as control.json to the repo's "control" branch,
+// switches and the signal sound (switch, mode, volume, lowest Windows volume) with the command key and force-pushes them as control.json to the repo's "control" branch,
 // which installed copies check every 3 seconds (RemoteControl.cs).
 // The page only answers this PC: requests must use Host localhost:8790, and changes need a custom
 // header that other websites can't send, so a web page open in the browser can't trigger a publish.
@@ -140,6 +140,8 @@ async Task<(bool Ok, string Json)> PublishAsync(string body)
                 && md.GetString() == "keypress" ? "keypress" : "loop");
             json.WriteNumber("keyHold", sig.TryGetProperty("keyHold", out var kh) && kh.TryGetDouble(out var hold) && double.IsFinite(hold)
                 ? Math.Clamp(hold, 0.1, 10) : 1.2);
+            json.WriteNumber("systemMin", sig.TryGetProperty("systemMin", out var sm) && sm.TryGetDouble(out var min) && double.IsFinite(min)
+                ? Math.Clamp(min, 0, 1) : 0.3);
             json.WriteEndObject();
         }
         json.WriteEndObject();

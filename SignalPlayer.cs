@@ -6,8 +6,9 @@
 //             full volume on the next one; when that time runs out it stops and rewinds, so the next key
 //             starts the clip from the beginning. Only the time of a key press is used, never which key,
 //             and nothing about typing is logged. A key press also undoes a mute or lowered slider for this
-//             app in the Volume Mixer (AudioSessions.cs), so the set volume applies again.
-// Turning the sound on does that too. Volume is relative to the Windows volume.
+//             app in the Volume Mixer (AudioSessions.cs), so the set volume applies again, and unmutes the
+//             PC and raises its Windows volume to at least SystemMin.
+// In loop mode, turning the sound on (or changing its settings) does that too. Volume is relative to the Windows volume.
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Windows.Media.Core;
@@ -51,11 +52,8 @@ sealed class SignalPlayer(Action<string> log, bool muted = false, bool hookKeys 
                     StopListening();
                     audible = false;
                     player.Volume = settings.Volume;
-                    if (!old.Playing || old.Mode != "loop")
-                    {
-                        player.Play();
-                        _ = RestoreMixerSoonAsync();  // the mixer entry exists once playback has started
-                    }
+                    if (!old.Playing || old.Mode != "loop") player.Play();
+                    if (settings != old) _ = RestoreMixerSoonAsync();  // the mixer entry exists once playback has started
                 }
                 else
                 {
@@ -140,6 +138,12 @@ sealed class SignalPlayer(Action<string> log, bool muted = false, bool hookKeys 
             if (AudioSessions.Restore() > 0) log("Signal sound: it was muted or turned down in the Volume Mixer; restored");
         }
         catch (Exception ex) { log($"Signal sound: couldn't check the Volume Mixer ({ex.Message})"); }
+        if (muted) return;  // test modes: a silent player leaves the PC's own mute and volume alone
+        try
+        {
+            if (AudioSessions.RestoreSystem(current.SystemMin) is { } changed) log($"Signal sound: Windows volume {changed}");
+        }
+        catch (Exception ex) { log($"Signal sound: couldn't check the Windows volume ({ex.Message})"); }
     }
 
     async Task RestoreMixerSoonAsync()

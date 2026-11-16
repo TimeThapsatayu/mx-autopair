@@ -1,6 +1,8 @@
 // This process's own entries in the Windows Volume Mixer (its audio sessions, one per output device it has played
 // on). Used by the signal sound to undo a mute or a lowered app slider, so the volume set in the command center
-// applies again. Only this process's sessions are touched; the Windows master volume and other apps are left alone.
+// applies again. Only this process's sessions are touched there; other apps' sliders are left alone.
+// RestoreSystem does the same for the PC as a whole: unmutes the default output device and raises its volume to a
+// minimum (which every app hears).
 // Plain COM calls through the interfaces' function tables (no runtime COM support, which the trimmed build lacks).
 using System.Runtime.InteropServices;
 
@@ -11,7 +13,60 @@ static unsafe class AudioSessions
     static readonly Guid SessionManager2 = new("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
     static readonly Guid SessionControl2 = new("BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D");
     static readonly Guid SimpleVolume = new("87CE5498-68D6-44E5-9215-6DA47EF883D8");
-    const int Render = 0, Active = 1, ClsCtxAll = 0x17, MultiThreaded = 0;
+    static readonly Guid EndpointVolume = new("5CDF2C82-841E-4546-9722-0CF74078229A");
+    const int Render = 0, Active = 1, ConsoleRole = 0, ClsCtxAll = 0x17, MultiThreaded = 0;
+
+    // Unmutes the default output device and raises its Windows volume to at least `minimum` (0-1). Returns what it
+    // changed ("unmuted, 10% -> 30%"), or null when nothing needed changing.
+    public static string? RestoreSystem(double minimum) => WithDefaultOutput(volume =>
+    {
+        var (muted, level) = Read(volume);
+        var target = (float)Math.Clamp(minimum, 0, 1);
+        var raise = level < target - 0.005f;
+        if (!muted && !raise) return null;
+        var context = Guid.Empty;
+        if (muted) Check(Call(volume, 14, 0, &context));  // SetMute(false)
+        if (raise) Check(Call(volume, 7, target, &context));  // SetMasterVolumeLevelScalar
+        return string.Join(", ", new[] { muted ? "unmuted" : null, raise ? $"{level:0%} -> {target:0%}" : null }.OfType<string>());
+    });
+
+    // The default output device's mute and Windows volume (0-1).
+    public static (bool Muted, float Level) SystemState() => WithDefaultOutput(Read);
+
+    // For --unmute-test: sets them (and puts them back afterwards).
+    public static void SetSystemForTest(bool muted, float level) => WithDefaultOutput(volume =>
+    {
+        var context = Guid.Empty;
+        Check(Call(volume, 7, level, &context));
+        Check(Call(volume, 14, muted ? 1 : 0, &context));
+        return 0;
+    });
+
+    static (bool Muted, float Level) Read(IntPtr volume)
+    {
+        int muted;
+        float level;
+        Check(Call(volume, 15, &muted));  // GetMute
+        Check(Call(volume, 9, &level));  // GetMasterVolumeLevelScalar
+        return (muted != 0, level);
+    }
+
+    static T WithDefaultOutput<T>(Func<IntPtr, T> action)
+    {
+        CoInitializeEx(IntPtr.Zero, MultiThreaded);
+        IntPtr enumerator = 0, device = 0, volume = 0;
+        try
+        {
+            var clsid = EnumeratorClass;
+            var iid = EnumeratorInterface;
+            Check(CoCreateInstance(&clsid, IntPtr.Zero, ClsCtxAll, &iid, &enumerator));
+            Check(Call(enumerator, 4, Render, ConsoleRole, &device));  // GetDefaultAudioEndpoint
+            var volumeIid = EndpointVolume;
+            Check(Call(device, 3, &volumeIid, ClsCtxAll, IntPtr.Zero, &volume));  // Activate
+            return action(volume);
+        }
+        finally { Release(volume); Release(device); Release(enumerator); }
+    }
 
     // Unmutes this process's sessions and puts their slider at 100%. Returns how many needed a change.
     public static int Restore() => ForEachOwnSession((volume) =>

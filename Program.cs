@@ -603,9 +603,11 @@ if (args.Contains("--signal-test", StringComparer.OrdinalIgnoreCase))
 }
 
 // Testing: plays the signal sound with the player itself muted (silent), mutes this app in the Volume Mixer and
-// lowers its slider, then checks that restoring puts both back.
+// lowers its slider, then checks that restoring puts both back. Then the same for the PC: mutes it at 5%, checks
+// that it comes back unmuted at 30%, and puts the PC's own mute and volume back as they were.
 if (args.Contains("--unmute-test", StringComparer.OrdinalIgnoreCase))
 {
+    var original = AudioSessions.SystemState();
     var test = new SignalPlayer(Log, muted: true);
     test.Apply(new SignalSettings(true, 0.5));
     await Task.Delay(1500);
@@ -614,6 +616,21 @@ if (args.Contains("--unmute-test", StringComparer.OrdinalIgnoreCase))
     Log($"unmute-test: restored {AudioSessions.Restore()} session(s): {AudioSessions.Describe()}");
     Log($"unmute-test: restoring again changes {AudioSessions.Restore()}");
     test.Apply(SignalSettings.Default);
+    Log($"unmute-test: PC before the PC part: {AudioSessions.SystemState()} (at the start: {original})");
+    try
+    {
+        AudioSessions.SetSystemForTest(true, 0.05f);
+        Log($"unmute-test: PC set to {AudioSessions.SystemState()}");
+        Log($"unmute-test: PC restore: {AudioSessions.RestoreSystem(0.3) ?? "no change"} -> {AudioSessions.SystemState()}");
+        Log($"unmute-test: PC restore again: {AudioSessions.RestoreSystem(0.3) ?? "no change"}");
+        AudioSessions.SetSystemForTest(true, 0.05f);
+        Log($"unmute-test: minimum 0 when muted at 5%: {AudioSessions.RestoreSystem(0) ?? "no change"} -> {AudioSessions.SystemState()}");
+    }
+    finally
+    {
+        AudioSessions.SetSystemForTest(original.Muted, original.Level);
+        Log($"unmute-test: PC put back to {AudioSessions.SystemState()} (was {original})");
+    }
     return;
 }
 
